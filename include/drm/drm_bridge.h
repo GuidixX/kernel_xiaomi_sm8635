@@ -650,6 +650,8 @@ struct drm_bridge_funcs {
 	 */
 	void (*hpd_disable)(struct drm_bridge *bridge);
 
+        int (*disp_get_panel_info)(struct drm_bridge *bridge, char *name);
+
 	/**
 	 * @debugfs_init:
 	 *
