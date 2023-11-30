@@ -48,6 +48,7 @@
 #include <linux/kcov.h>
 #include <linux/kprobes.h>
 #include <linux/llist_api.h>
+#include <linux/lrng.h>
 #include <linux/mmu_context.h>
 #include <linux/mmzone.h>
 #include <linux/mutex_api.h>
@@ -3736,6 +3737,8 @@ static void
 ttwu_stat(struct task_struct *p, int cpu, int wake_flags)
 {
 	struct rq *rq;
+
+	add_sched_randomness(p, cpu);
 
 	if (!schedstat_enabled())
 		return;

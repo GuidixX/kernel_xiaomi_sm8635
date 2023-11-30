@@ -3,7 +3,8 @@
 # Makefile for the kernel character device drivers.
 #
 
-obj-y				+= mem.o random.o
+obj-y				+= mem.o
+obj-$(CONFIG_RANDOM_DEFAULT_IMPL) += random.o
 obj-$(CONFIG_TTY_PRINTK)	+= ttyprintk.o
 obj-y				+= misc.o
 obj-$(CONFIG_ATARI_DSP56K)	+= dsp56k.o
@@ -49,3 +50,5 @@ obj-$(CONFIG_MSM_RDBG)		+= rdbg.o
 obj-$(CONFIG_VIRTIO_EAVB)       += virtio_eavb/
 obj-$(CONFIG_MSM_SMD_PKT)       += msm_smd_pkt.o
 obj-$(CONFIG_XLOGCHAR)      += xlogchar.o
+
+obj-$(CONFIG_LRNG)		+= lrng/
