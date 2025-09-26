@@ -41,7 +41,7 @@ EXPORT_SYMBOL_GPL(KP_MODE_CHANGE);
 static unsigned int kp_override_mode;
 static bool kp_override;
 
-static bool auto_kp __read_mostly = 0
+static bool auto_kp __read_mostly = 0;
 module_param(auto_kp, bool, 0664);
 MODULE_PARM_DESC(auto_kp, "Enable/disable automatic kernel profile management");
 
@@ -59,6 +59,19 @@ DEFINE_MUTEX(kp_set_mode_rb_lock);
 
 #define kp_err(fmt, ...)	pr_err(fmt, ##__VA_ARGS__)
 #define kp_info(fmt, ...)	pr_info(fmt, ##__VA_ARGS__)
+
+/*
+ * Mapping:
+ * - 0 -> 2 (kprofiles "disabled" behaves like mode 2 to in-kernel users)
+ * - 1..3 unchanged
+ */
+static __always_inline unsigned int kp_effective_mode(unsigned int stored)
+{
+	if (stored == 0)
+		return 2;
+
+	return stored;
+}
 
 static void kp_trigger_mode_change_event(void);
 
@@ -155,22 +168,29 @@ EXPORT_SYMBOL_GPL(kp_set_mode);
  *     // Things to be done when performance profile is active
  *     break;
  * default:
- *     // Things to be done when kprofiles is disabled
+ *     // Things to be done when kprofiles is disabled (forced to balanced in kernel)
  *     break;
  * }
  */
 int kp_active_mode(void)
 {
-	if (READ_ONCE(kp_override))
-		return READ_ONCE(kp_override_mode);
+	unsigned int mode;
 
-	if (unlikely(READ_ONCE(kp_mode) > 3)) {
-		WRITE_ONCE(kp_mode, 0);
-		kp_trigger_mode_change_event();
-		kp_err("Invalid value passed, falling back to level 0\n");
+	if (READ_ONCE(kp_override)) {
+		mode = READ_ONCE(kp_override_mode);
+		if (unlikely(mode > 3))
+			mode = 0;
+		return kp_effective_mode(mode);
 	}
 
-	return READ_ONCE(kp_mode);
+	mode = READ_ONCE(kp_mode);
+	if (unlikely(mode > 3)) {
+		WRITE_ONCE(kp_mode, 0);
+		kp_err("Invalid value passed, falling back to level 0\n");
+		mode = 0;
+	}
+
+	return kp_effective_mode(mode);
 }
 EXPORT_SYMBOL_GPL(kp_active_mode);
 
