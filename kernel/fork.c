@@ -100,7 +100,6 @@
 #include <linux/tick.h>
 #include <linux/cpufreq_times.h>
 #include <linux/dma-buf.h>
-#include <linux/cpu_boost.h>
 
 #include <asm/pgalloc.h>
 #include <linux/uaccess.h>
@@ -2839,8 +2838,6 @@ struct task_struct *create_io_thread(int (*fn)(void *), void *arg, int node)
 	return copy_process(NULL, 0, node, &args);
 }
 
-extern int kp_active_mode(void);
-
 /*
  *  Ok, this is the main fork-routine.
  *
@@ -2871,10 +2868,6 @@ pid_t kernel_clone(struct kernel_clone_args *args)
 	    (args->flags & CLONE_PARENT_SETTID) &&
 	    (args->pidfd == args->parent_tid))
 		return -EINVAL;
-
-	/* Boost CPUs to the max for 50 ms when userspace launches an app */
-	if (task_is_zygote(current) && kp_active_mode() != 1)
-		cpu_boost_max(50);
 
 	/*
 	 * Determine whether and which event to report to ptracer.  When

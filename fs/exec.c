@@ -83,49 +83,8 @@ static int bprm_creds_from_file(struct linux_binprm *bprm);
 
 int suid_dumpable = 0;
 
-#define LIBPERFMGR_BIN "/vendor/bin/hw/android.hardware.power-service.lineage-libperfmgr"
-#define SERVICEMANAGER_BIN "/system/bin/servicemanager"
-
-static struct task_struct *servicemanager_tsk;
-bool task_is_servicemanager(struct task_struct *p)
-{
-	return p == READ_ONCE(servicemanager_tsk);
-}
-
-static struct task_struct *libperfmgr_tsk;
-bool task_is_libperfmgr(struct task_struct *p)
-{
-	struct task_struct *tsk;
-	bool ret;
-
-	rcu_read_lock();
-	tsk = READ_ONCE(libperfmgr_tsk);
-	ret = tsk && same_thread_group(p, tsk);
-	rcu_read_unlock();
-
-	return ret;
-}
-
-void dead_special_task(void)
-{
-	if (unlikely(current == servicemanager_tsk))
-		WRITE_ONCE(servicemanager_tsk, NULL);
-	else if (unlikely(current == libperfmgr_tsk))
-		WRITE_ONCE(libperfmgr_tsk, NULL);
-}
-
 static LIST_HEAD(formats);
 static DEFINE_RWLOCK(binfmt_lock);
-
-#define ZYGOTE32_BIN "/system/bin/app_process"
-#define ZYGOTE64_BIN "/system/bin/app_process64"
-static struct signal_struct *zygote32_sig;
-static struct signal_struct *zygote64_sig;
-
-bool task_is_zygote(struct task_struct *p)
-{
-	return p->signal == zygote32_sig || p->signal == zygote64_sig;
-}
 
 void __register_binfmt(struct linux_binfmt * fmt, int insert)
 {
@@ -1918,18 +1877,6 @@ static int bprm_execve(struct linux_binprm *bprm,
 	retval = exec_binprm(bprm);
 	if (retval < 0)
 		goto out;
-
-	if (is_global_init(current->parent)) {
-		if (unlikely(!strcmp(filename->name, ZYGOTE32_BIN)))
-			zygote32_sig = current->signal;
-		else if (unlikely(!strcmp(filename->name, ZYGOTE64_BIN)))
-			zygote64_sig = current->signal;
-		if (unlikely(!strcmp(filename->name, LIBPERFMGR_BIN))) {
-			WRITE_ONCE(libperfmgr_tsk, current);
-		} else if (unlikely(!strcmp(filename->name, SERVICEMANAGER_BIN))) {
-			WRITE_ONCE(servicemanager_tsk, current);
-		}
-	}
 
 	/* execve succeeded */
 	current->fs->in_exec = 0;
