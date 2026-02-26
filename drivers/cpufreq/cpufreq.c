@@ -2788,6 +2788,7 @@ err_reset_state:
 
 	return ret;
 }
+EXPORT_SYMBOL_GPL(cpufreq_boost_trigger_state);
 
 static bool cpufreq_boost_supported(void)
 {
