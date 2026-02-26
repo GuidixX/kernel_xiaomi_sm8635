@@ -78,6 +78,11 @@ static ssize_t get_cpu_max_freq(struct kobject *kobj,
 static ssize_t set_cpu_max_freq(struct kobject *kobj,
 	struct kobj_attribute *attr, const char *buf,
 	size_t count);
+static ssize_t get_cpu_freq_boost(struct kobject *kobj,
+	struct kobj_attribute *attr, char *buf);
+static ssize_t set_cpu_freq_boost(struct kobject *kobj,
+	struct kobj_attribute *attr, const char *buf,
+	size_t count);
 static ssize_t get_cpu_total_instruction(struct kobject *kobj,
 	struct kobj_attribute *attr, char *buf);
 static ssize_t get_game_start_pid(struct kobject *kobj,
@@ -119,6 +124,8 @@ static struct kobj_attribute cpu_min_freq_attr =
 	__ATTR(cpu_min_freq, 0644, get_cpu_min_freq, set_cpu_min_freq);
 static struct kobj_attribute cpu_max_freq_attr =
 	__ATTR(cpu_max_freq, 0644, get_cpu_max_freq, set_cpu_max_freq);
+static struct kobj_attribute cpu_freq_boost_attr =
+	__ATTR(cpu_freq_boost, 0644, get_cpu_freq_boost, set_cpu_freq_boost);
 static struct kobj_attribute inst_attr =
 	__ATTR(inst, 0444, get_cpu_total_instruction, NULL);
 #if IS_ENABLED(CONFIG_SCHED_WALT)
@@ -177,6 +184,7 @@ static int add_plh_params(void)
 static struct attribute *param_attrs[] = {
 	&cpu_min_freq_attr.attr,
 	&cpu_max_freq_attr.attr,
+	&cpu_freq_boost_attr.attr,
 	&inst_attr.attr,
 #if IS_ENABLED(CONFIG_SCHED_WALT)
 	&core_ctl_register_attr.attr,
@@ -487,6 +495,34 @@ static ssize_t get_cpu_max_freq(struct kobject *kobj,
 	}
 	cnt += scnprintf(buf + cnt, PAGE_SIZE - cnt, "\n");
 	return cnt;
+}
+
+static ssize_t get_cpu_freq_boost(struct kobject *kobj,
+	struct kobj_attribute *attr, char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE, "%d\n", cpufreq_boost_enabled());
+}
+
+static ssize_t set_cpu_freq_boost(struct kobject *kobj,
+	struct kobj_attribute *attr, const char *buf, size_t count)
+{
+	int val, ret;
+
+	ret = kstrtoint(buf, 10, &val);
+	if (ret)
+		return ret;
+
+	if (val != 0 && val != 1)
+		return -EINVAL;
+
+	ret = cpufreq_boost_trigger_state(val);
+	if (ret) {
+		pr_err("msm_perf: Failed to %s cpu freq boost: %d\n",
+		       val ? "enable" : "disable", ret);
+		return ret;
+	}
+
+	return count;
 }
 
 static struct kobject *events_kobj;
