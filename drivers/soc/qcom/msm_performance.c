@@ -358,17 +358,14 @@ static int msm_perf_kp_notifier_cb(struct notifier_block *nb,
 	mode = (unsigned int)(uintptr_t)data;
 
 	switch (mode) {
-	case 3: /* Performance: unlock boost frequencies, remove caps */
-		cpufreq_boost_trigger_state(1);
+	case 3: /* Performance: remove frequency caps (boost is hardware-controlled on SM8635) */
 		msm_perf_clear_battery_limits();
 		break;
-	case 1: /* Battery: disable boost, cap little/big, pin prime to min */
-		cpufreq_boost_trigger_state(0);
+	case 1: /* Battery: cap little/big, pin prime to min */
 		msm_perf_apply_battery_limits();
 		break;
-	case 2: /* Balanced: disable boost, remove any battery caps */
+	case 2: /* Balanced: remove any battery caps */
 	default:
-		cpufreq_boost_trigger_state(0);
 		msm_perf_clear_battery_limits();
 		break;
 	}
