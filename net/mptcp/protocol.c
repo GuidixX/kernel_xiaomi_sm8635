@@ -807,16 +807,17 @@ static bool __mptcp_ofo_queue(struct mptcp_sock *msk)
 
 static bool __mptcp_subflow_error_report(struct sock *sk, struct sock *ssk)
 {
-	int err = sock_error(ssk);
 	int ssk_state;
-
-	if (!err)
-		return false;
+	int err;
 
 	/* only propagate errors on fallen-back sockets or
 	 * on MPC connect
 	 */
 	if (sk->sk_state != TCP_SYN_SENT && !__mptcp_check_fallback(mptcp_sk(sk)))
+		return false;
+
+	err = sock_error(ssk);
+	if (!err)
 		return false;
 
 	/* We need to propagate only transition to CLOSE state.
@@ -2566,8 +2567,8 @@ out:
 void mptcp_close_ssk(struct sock *sk, struct sock *ssk,
 		     struct mptcp_subflow_context *subflow)
 {
-	/* The first subflow can already be closed and still in the list */
-	if (subflow->close_event_done)
+	/* The first subflow can already be closed or disconnected */
+	if (subflow->close_event_done || READ_ONCE(subflow->local_id) < 0)
 		return;
 
 	subflow->close_event_done = true;
@@ -2713,9 +2714,15 @@ static void __mptcp_retrans(struct sock *sk)
 	info.sent = 0;
 	info.limit = READ_ONCE(msk->csum_enabled) ? dfrag->data_len : dfrag->already_sent;
 
-	/* make the whole retrans decision, xmit, disallow fallback atomic */
+	/*
+	 * make the whole retrans decision, xmit, disallow
+	 * fallback atomic, note that we can't retrans even
+	 * when an infinite fallback is in progress, i.e. new
+	 * subflows are disallowed.
+	 */
 	spin_lock_bh(&msk->fallback_lock);
-	if (__mptcp_check_fallback(msk)) {
+	if (__mptcp_check_fallback(msk) ||
+	    !msk->allow_subflows) {
 		spin_unlock_bh(&msk->fallback_lock);
 		release_sock(ssk);
 		return;
@@ -2804,6 +2811,12 @@ static void mptcp_do_fastclose(struct sock *sk)
 			goto unlock;
 
 		subflow->send_fastclose = 1;
+
+		/* Initialize rcv_mss to TCP_MIN_MSS to avoid division by 0
+		 * issue in __tcp_select_window(), see tcp_disconnect().
+		 */
+		inet_csk(ssk)->icsk_ack.rcv_mss = TCP_MIN_MSS;
+
 		tcp_send_active_reset(ssk, ssk->sk_allocation);
 unlock:
 		release_sock(ssk);
