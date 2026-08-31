@@ -1501,6 +1501,9 @@ static int arm_smmu_init_domain_context(struct iommu_domain *domain,
 	if (pgtbl_cfg->quirks & IO_PGTABLE_QUIRK_ARM_TTBR1) {
 		domain->geometry.aperture_start = ~0UL << ias;
 		domain->geometry.aperture_end = ~0UL;
+	} else if (fmt == ARM_V8L_FAST) {
+		domain->geometry.aperture_start = pgtbl_info->iova_base;
+		domain->geometry.aperture_end = pgtbl_info->iova_end;
 	} else {
 		domain->geometry.aperture_end = (1UL << ias) - 1;
 	}
