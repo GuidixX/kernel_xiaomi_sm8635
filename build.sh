@@ -51,6 +51,6 @@ cp -rp ./anykernel/* tmp
 cd tmp
 7za a -mx9 tmp.zip *
 cd ..
-cp -fp tmp/tmp.zip Chidori-Kernel-V1.9-peridot-$TIME.zip
+cp -fp tmp/tmp.zip Chidori-Kernel-V2.0-peridot-$TIME.zip
 rm -rf tmp
 echo $TIME
