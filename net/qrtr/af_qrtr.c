@@ -210,16 +210,20 @@ struct qrtr_tx_flow_waiter {
  * @resume_tx: waiters for a resume tx from the remote
  * @pending: number of waiting senders
  * @tx_failed: indicates that a message with confirm_rx flag was lost
+ * @dead: remote processor was removed; stop waiting for resume tx
  * @waiters: list of ports to notify when this flow resumes
  * @lock: lock to protect flow variables
+ * @ref: references held by the xarray and active transmitters
  */
 struct qrtr_tx_flow {
 	struct wait_queue_head resume_tx;
 	int pending;
 	int tx_failed;
+	bool dead;
 	struct list_head waiters;
 	/* protect above flow variables */
 	spinlock_t lock;
+	struct kref ref;
 };
 
 #define QRTR_TX_FLOW_HIGH	10
@@ -415,6 +419,38 @@ static inline int kref_put_rwsem_lock(struct kref *kref,
 	return 0;
 }
 
+static void qrtr_tx_flow_release(struct kref *ref)
+{
+	struct qrtr_tx_flow *flow = container_of(ref, struct qrtr_tx_flow, ref);
+	struct qrtr_tx_flow_waiter *waiter, *temp;
+
+	list_for_each_entry_safe(waiter, temp, &flow->waiters, node) {
+		list_del(&waiter->node);
+		sock_put(waiter->sk);
+		kfree(waiter);
+	}
+	kfree(flow);
+}
+
+static void qrtr_tx_flow_put(struct qrtr_tx_flow *flow)
+{
+	kref_put(&flow->ref, qrtr_tx_flow_release);
+}
+
+/* The caller removes the xarray entry while holding qrtr_tx_lock. */
+static void qrtr_tx_flow_disconnect(struct qrtr_tx_flow *flow)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&flow->lock, flags);
+	flow->dead = true;
+	wake_up_interruptible_all(&flow->resume_tx);
+	spin_unlock_irqrestore(&flow->lock, flags);
+
+	/* A sender may still be asleep on resume_tx or using flow->lock. */
+	qrtr_tx_flow_put(flow);
+}
+
 /* Release node resources and free the node.
  *
  * Do not call directly, use qrtr_node_release.  To be used with
@@ -423,10 +459,8 @@ static inline int kref_put_rwsem_lock(struct kref *kref,
 static void __qrtr_node_release(struct kref *kref)
 {
 	struct qrtr_node *node = container_of(kref, struct qrtr_node, ref);
-	struct qrtr_tx_flow_waiter *waiter;
-	struct qrtr_tx_flow_waiter *temp;
 	struct radix_tree_iter iter;
-	struct qrtr_tx_flow *flow=0;
+	struct qrtr_tx_flow *flow;
 	unsigned long flags;
 	void __rcu **slot;
 	unsigned long index;
@@ -453,12 +487,8 @@ static void __qrtr_node_release(struct kref *kref)
 	/* Free tx flow counters */
 	mutex_lock(&node->qrtr_tx_lock);
 	xa_for_each(&node->qrtr_tx_flow, index, flow) {
-		list_for_each_entry_safe(waiter, temp, &flow->waiters, node) {
-			list_del(&waiter->node);
-			sock_put(waiter->sk);
-			kfree(waiter);
-		}
-		kfree(flow);
+		xa_erase(&node->qrtr_tx_flow, index);
+		qrtr_tx_flow_disconnect(flow);
 	}
 	xa_destroy(&node->qrtr_tx_flow);
 	mutex_unlock(&node->qrtr_tx_lock);
@@ -510,9 +540,11 @@ static void qrtr_tx_resume(struct qrtr_node *node, struct sk_buff *skb)
 
 	mutex_lock(&node->qrtr_tx_lock);
 	flow = xa_load(&node->qrtr_tx_flow, key);
+	if (flow)
+		kref_get(&flow->ref);
 	mutex_unlock(&node->qrtr_tx_lock);
 	if (!flow)
-		return;
+		goto out;
 
 	spin_lock_irqsave(&flow->lock, flags);
 	flow->pending = 0;
@@ -531,7 +563,9 @@ static void qrtr_tx_resume(struct qrtr_node *node, struct sk_buff *skb)
 		kfree(waiter);
 	}
 	spin_unlock_irqrestore(&flow->lock, flags);
+	qrtr_tx_flow_put(flow);
 
+out:
 	consume_skb(skb);
 }
 
@@ -572,6 +606,8 @@ static int qrtr_tx_wait(struct qrtr_node *node, struct sockaddr_qrtr *to,
 	if (!flow) {
 		flow = kzalloc(sizeof(*flow), GFP_KERNEL);
 		if (flow) {
+			/* The xarray owns the initial reference. */
+			kref_init(&flow->ref);
 			INIT_LIST_HEAD(&flow->waiters);
 			init_waitqueue_head(&flow->resume_tx);
 			spin_lock_init(&flow->lock);
@@ -582,6 +618,8 @@ static int qrtr_tx_wait(struct qrtr_node *node, struct sockaddr_qrtr *to,
 			}
 		}
 	}
+	if (flow)
+		kref_get(&flow->ref);
 	mutex_unlock(&node->qrtr_tx_lock);
 
 	/* Set confirm_rx if we where unable to find and allocate a flow */
@@ -592,12 +630,13 @@ static int qrtr_tx_wait(struct qrtr_node *node, struct sockaddr_qrtr *to,
 	ret = wait_event_interruptible_lock_irq_timeout(flow->resume_tx,
 							flow->pending < QRTR_TX_FLOW_HIGH ||
 							flow->tx_failed ||
+							flow->dead ||
 							!node->ep,
 							flow->lock,
 							timeo);
 	if (ret < 0) {
 		confirm_rx = ret;
-	} else if (!node->ep) {
+	} else if (flow->dead || !node->ep) {
 		confirm_rx = -EPIPE;
 	} else if (flow->tx_failed) {
 		flow->tx_failed = 0;
@@ -605,15 +644,15 @@ static int qrtr_tx_wait(struct qrtr_node *node, struct sockaddr_qrtr *to,
 	} else if (!ret && flow->pending >= QRTR_TX_FLOW_HIGH) {
 		list_for_each_entry(waiter, &flow->waiters, node) {
 			if (waiter->sk == sk) {
-				spin_unlock_irq(&flow->lock);
-				return -EAGAIN;
+				confirm_rx = -EAGAIN;
+				goto unlock;
 			}
 		}
 
 		waiter = kzalloc(sizeof(*waiter), GFP_ATOMIC);
 		if (!waiter) {
-			spin_unlock_irq(&flow->lock);
-			return -ENOMEM;
+			confirm_rx = -ENOMEM;
+			goto unlock;
 		}
 		waiter->sk = sk;
 		sock_hold(sk);
@@ -627,7 +666,9 @@ static int qrtr_tx_wait(struct qrtr_node *node, struct sockaddr_qrtr *to,
 		flow->pending++;
 		confirm_rx = flow->pending == QRTR_TX_FLOW_LOW;
 	}
+unlock:
 	spin_unlock_irq(&flow->lock);
+	qrtr_tx_flow_put(flow);
 
 	return confirm_rx;
 }
@@ -653,11 +694,14 @@ static void qrtr_tx_flow_failed(struct qrtr_node *node, int dest_node,
 
 	mutex_lock(&node->qrtr_tx_lock);
 	flow = xa_load(&node->qrtr_tx_flow, key);
+	if (flow)
+		kref_get(&flow->ref);
 	mutex_unlock(&node->qrtr_tx_lock);
 	if (flow) {
 		spin_lock_irq(&flow->lock);
 		flow->tx_failed = 1;
 		spin_unlock_irq(&flow->lock);
+		qrtr_tx_flow_put(flow);
 	}
 }
 
@@ -1315,8 +1359,6 @@ static void qrtr_handle_del_proc(struct qrtr_node *node, struct sk_buff *skb)
 	struct sockaddr_qrtr src = {AF_QIPCRTR, 0, QRTR_PORT_CTRL};
 	struct sockaddr_qrtr dst = {AF_QIPCRTR, qrtr_local_nid, QRTR_PORT_CTRL};
 	struct qrtr_ctrl_pkt pkt = {0,};
-	struct qrtr_tx_flow_waiter *waiter;
-	struct qrtr_tx_flow_waiter *temp;
 	struct qrtr_tx_flow *flow;
 	unsigned long node_id;
 	unsigned long index;
@@ -1330,13 +1372,8 @@ static void qrtr_handle_del_proc(struct qrtr_node *node, struct sk_buff *skb)
 		node_id = (index & 0xFFFFFFFF00000000) >> 32;
 		if (node_id != src.sq_node)
 			continue;
-		list_for_each_entry_safe(waiter, temp, &flow->waiters, node) {
-			list_del(&waiter->node);
-			sock_put(waiter->sk);
-			kfree(waiter);
-		}
-		kfree(flow);
 		xa_erase(&node->qrtr_tx_flow, index);
+		qrtr_tx_flow_disconnect(flow);
 	}
 	mutex_unlock(&node->qrtr_tx_lock);
 
