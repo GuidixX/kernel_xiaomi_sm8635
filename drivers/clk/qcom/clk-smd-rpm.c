@@ -2,7 +2,7 @@
 /*
  * Copyright (c) 2016, Linaro Limited
  * Copyright (c) 2014, The Linux Foundation. All rights reserved.
- * Copyright (c) 2023-2024, Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  */
 
 #include <linux/clk-provider.h>
@@ -1476,6 +1476,7 @@ static const struct of_device_id rpm_smd_clk_match_table[] = {
 	{ .compatible = "qcom,rpmcc-sm6375",  .data = &rpm_clk_sm6375  },
 	{ .compatible = "qcom,rpmcc-holi", .data = &rpm_clk_holi},
 	{ .compatible = "qcom,rpmcc-pitti", .data = &rpm_clk_pitti},
+	{ .compatible = "qcom,rpmcc-pitti-wear", .data = &rpm_clk_pitti},
 	{ }
 };
 MODULE_DEVICE_TABLE(of, rpm_smd_clk_match_table);
@@ -1545,6 +1546,12 @@ static int rpm_smd_clk_probe(struct platform_device *pdev)
 
 	is_pitti = of_device_is_compatible(pdev->dev.of_node,
 						"qcom,rpmcc-pitti");
+
+	if (of_device_is_compatible(pdev->dev.of_node, "qcom,rpmcc-pitti-wear")) {
+		is_pitti = true;
+		pitti_clks[RPM_SMD_RF_CLK3] = &qcm2290_rf_clk3.hw;
+		pitti_clks[RPM_SMD_RF_CLK3_A] = &qcm2290_rf_clk3_a.hw;
+	}
 
 	is_mdm9607 = of_device_is_compatible(pdev->dev.of_node,
 						"qcom,rpmcc-mdm9607");

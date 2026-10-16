@@ -5197,8 +5197,10 @@ static int dwc3_msm_extcon_register(struct dwc3_msm *mdwc)
 
 	for (idx = 0; idx < extcon_cnt; idx++) {
 		edev = extcon_get_edev_by_phandle(mdwc->dev, idx);
-		if (IS_ERR(edev) && PTR_ERR(edev) != -ENODEV)
-			return PTR_ERR(edev);
+		if (IS_ERR(edev) && PTR_ERR(edev) != -ENODEV) {
+			ret = PTR_ERR(edev);
+			goto err_unregister;
+		}
 
 		if (IS_ERR_OR_NULL(edev))
 			continue;
@@ -5244,6 +5246,17 @@ static int dwc3_msm_extcon_register(struct dwc3_msm *mdwc)
 	}
 
 	return 0;
+
+err_unregister:
+	while (--idx >= 0) {
+		if (!mdwc->extcon[idx].edev)
+			continue;
+		extcon_unregister_notifier(mdwc->extcon[idx].edev, EXTCON_USB,
+						&mdwc->extcon[idx].vbus_nb);
+		extcon_unregister_notifier(mdwc->extcon[idx].edev, EXTCON_USB_HOST,
+						&mdwc->extcon[idx].id_nb);
+	}
+	return ret;
 }
 
 static inline const char *dwc3_msm_usb_role_string(enum usb_role role)

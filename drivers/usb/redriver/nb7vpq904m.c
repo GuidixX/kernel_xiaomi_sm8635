@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2018-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2022-2025 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  */
 
 #include <linux/module.h>
@@ -22,6 +22,9 @@
 
 /* Registers Address */
 #define GEN_DEV_SET_REG			0x00
+
+#define AUX_SEL_SET_REG			0x09
+
 #define CHIP_VERSION_REG		0x17
 
 #define REDRIVER_REG_MAX		0x1f
@@ -66,6 +69,10 @@
 #define CHNC_INDEX		2
 #define CHND_INDEX		3
 
+#define ORIENTATION_CC1_SELECT		0x00
+#define ORIENTATION_CC2_SELECT		0x01
+#define ORIENTATION_DEF_SELECT		0x02
+
 enum operation_mode {
 	OP_MODE_NONE,		/* 4 lanes disabled */
 	OP_MODE_USB,		/* 2 lanes for USB and 2 lanes disabled */
@@ -86,7 +93,8 @@ enum operation_mode {
 #define PULLUP_WORKER_DELAY_US	500000
 
 #define CHIP_MAX_PWR_UA		260000
-#define CHIP_MIN_PWR_UV		1710000
+#define CHIP_MIN_PWR_UV		1800000
+
 #define CHIP_MAX_PWR_UV		1890000
 
 struct nb7vpq904m_redriver {
@@ -258,6 +266,25 @@ static int nb7vpq904m_gen_dev_set(struct nb7vpq904m_redriver *redriver)
 	}
 
 	redriver->gen_dev_val = val;
+
+	if (redriver->op_mode == OP_MODE_DP || redriver->op_mode == OP_MODE_USB_AND_DP) {
+		int ret;
+
+		if (redriver->typec_orientation == ORIENTATION_CC1)
+			ret = nb7vpq904m_reg_set(redriver, AUX_SEL_SET_REG, ORIENTATION_CC1_SELECT);
+		else if (redriver->typec_orientation == ORIENTATION_CC2)
+			ret = nb7vpq904m_reg_set(redriver, AUX_SEL_SET_REG, ORIENTATION_CC2_SELECT);
+		else
+			return -EINVAL;
+
+		if (ret < 0)
+			return ret;
+	} else {
+		int ret = nb7vpq904m_reg_set(redriver, AUX_SEL_SET_REG, ORIENTATION_DEF_SELECT);
+
+		if (ret < 0)
+			return ret;
+	}
 
 	return nb7vpq904m_reg_set(redriver, GEN_DEV_SET_REG, val);
 }
@@ -513,12 +540,18 @@ static int nb7vpq904m_notify_disconnect(struct usb_redriver *r)
 		return 0;
 
 	redriver->op_mode = OP_MODE_NONE;
+
 	ret = nb7vpq904m_reg_set(redriver, GEN_DEV_SET_REG, 0);
+	if (ret)
+		dev_err(redriver->dev, "failed to reset GEN_DEV_SET_REG: %d\n", ret);
 
-	if (!ret)
-		nb7vpq904m_vdd_enable(redriver, false);
+	ret = nb7vpq904m_reg_set(redriver, AUX_SEL_SET_REG, ORIENTATION_DEF_SELECT);
+	if (ret)
+		dev_err(redriver->dev, "failed to reset AUX_SEL_SET_REG: %d\n", ret);
 
-	return 0;
+	nb7vpq904m_vdd_enable(redriver, false);
+
+	return ret;
 }
 
 static int nb7vpq904m_release_usb_lanes(struct usb_redriver *r, int ort, int num)

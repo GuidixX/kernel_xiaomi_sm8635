@@ -516,7 +516,7 @@ static int sc_tcm_carveout_heap_init(struct platform_heap *heap_data,
 	void *base;
 
 	base = sc_tcm_mem_alloc(heap_data->size);
-	if (!base) {
+	if (IS_ERR_OR_NULL(base)) {
 		pr_err("sc_tcm_carveout: unable to allocate memory of size %pa\n",
 				&heap_data->size);
 		return -ENOMEM;

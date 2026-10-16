@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2022-2024 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  */
 
 #define pr_fmt(fmt)	"qti_qpt: %s: " fmt, __func__
@@ -32,6 +32,7 @@
 
 #define QPT_GET_POWER_UW_FROM_ADC(adc)	((adc) * QPT_DATA_TO_POWER_UW)
 #define QPT_SDAM_SAMPLING_MS		1280
+#define QPT_MAX_ENERGY_UJ		U64_MAX  /* Maximum energy value to prevent overflow */
 
 static int qpt_sdam_nvmem_read(struct qpt_priv *qpt, struct qpt_sdam *sdam,
 		uint16_t offset, size_t bytes, void *data)
@@ -63,12 +64,44 @@ static int qti_qpt_read_rtc_time(struct qpt_priv *qpt, u64 *rtc_ts)
 static void qpt_channel_avg_data_update(struct qpt_device *qpt_dev,
 		uint8_t lsb, uint8_t msb, u64 ts)
 {
+	u64 time_diff_ms;
+	u64 energy_increment_uj;
+
 	mutex_lock(&qpt_dev->lock);
 	qpt_dev->last_data = (msb << 8) | lsb;
 	qpt_dev->last_data_uw = QPT_GET_POWER_UW_FROM_ADC(qpt_dev->last_data);
+
+	/* Calculate cumulative energy from power readings
+	 * Energy (uJ) = Power (uW) * Time (ms) * 1000
+	 * last_data_uw is already an average power reading
+	 * Protect against overflow by checking before addition
+	 */
+	if (qpt_dev->prev_read_ts > 0) {
+		time_diff_ms = ktime_to_ms(ktime_sub(ts, qpt_dev->prev_read_ts));
+		if (time_diff_ms > 0) {
+			energy_increment_uj = (qpt_dev->last_data_uw * time_diff_ms) / 1000;
+
+			/* Check for overflow before adding to total energy
+			 * If adding would overflow, saturate at max value
+			 */
+			if (energy_increment_uj > 0 &&
+			    qpt_dev->total_energy_uj > (QPT_MAX_ENERGY_UJ - energy_increment_uj)) {
+				dev_warn(qpt_dev->priv->dev,
+					"qpt[%s]: Energy overflow detected, saturating at max\n",
+					qpt_dev->name);
+				qpt_dev->total_energy_uj = QPT_MAX_ENERGY_UJ;
+			} else {
+				qpt_dev->total_energy_uj += energy_increment_uj;
+			}
+		}
+	}
+
+	qpt_dev->prev_last_data_uw = qpt_dev->last_data_uw;
+	qpt_dev->prev_read_ts = ts;
+
 	mutex_unlock(&qpt_dev->lock);
-	QPT_DBG(qpt_dev->priv, "qpt[%s]: power:%lluuw msb:0x%x lsb:0x%x",
-			qpt_dev->name, qpt_dev->last_data_uw, msb, lsb);
+	QPT_DBG(qpt_dev->priv, "qpt[%s]: power:%lluuw energy:%lluuj msb:0x%x lsb:0x%x",
+			qpt_dev->name, qpt_dev->last_data_uw, qpt_dev->total_energy_uj, msb, lsb);
 }
 
 static int qti_qpt_read_seq_count(struct qpt_priv *qpt, int *seq_count)
@@ -131,6 +164,13 @@ static void qti_qpt_get_power(struct qpt_device *qpt_dev, u64 *power_uw)
 {
 	mutex_lock(&qpt_dev->lock);
 	*power_uw = qpt_dev->last_data_uw;
+	mutex_unlock(&qpt_dev->lock);
+}
+
+static void qti_qpt_get_energy(struct qpt_device *qpt_dev, u64 *energy_uj)
+{
+	mutex_lock(&qpt_dev->lock);
+	*energy_uj = qpt_dev->total_energy_uj;
 	mutex_unlock(&qpt_dev->lock);
 }
 
@@ -506,6 +546,7 @@ static void qti_qpt_hw_release(struct qpt_priv *qpt)
 struct qpt_ops qpt_hw_ops = {
 	.init = qti_qpt_hw_init,
 	.get_power = qti_qpt_get_power,
+	.get_energy = qti_qpt_get_energy,
 	.suspend   = qti_qpt_suspend,
 	.resume   = qti_qpt_resume,
 	.release = qti_qpt_hw_release,

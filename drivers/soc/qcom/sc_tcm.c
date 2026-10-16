@@ -156,6 +156,9 @@ static int sc_tcm_region_llcc(phys_addr_t *base, size_t *size)
 		return 0;
 	}
 
+	if (IS_ERR(data) && PTR_ERR(data) == -ENODEV)
+		return -ENODEV;
+
 	return -EINVAL;
 }
 
@@ -168,6 +171,10 @@ static int __init sc_tcm_module_init(void)
 	ret = sc_tcm_region_llcc(&base, &size);
 	if (ret) {
 		pr_err("SC TCM region is not defined\n");
+
+		if (ret == -ENODEV)
+			return 0;
+
 		return ret;
 	}
 

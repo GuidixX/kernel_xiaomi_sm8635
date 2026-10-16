@@ -3547,7 +3547,7 @@ static irqreturn_t qcom_scm_irq_handler(int irq, void *p)
 	return IRQ_HANDLED;
 }
 
-static int __qcom_multi_smc_init(struct qcom_scm *scm,
+static void __qcom_multi_smc_init(struct qcom_scm *scm,
 						struct platform_device *pdev)
 {
 	int ret = 0, irq;
@@ -3560,7 +3560,7 @@ static int __qcom_multi_smc_init(struct qcom_scm *scm,
 		irq = platform_get_irq(pdev, 0);
 		if (irq < 0) {
 			dev_err(scm->dev, "WQ IRQ is not specified: %d\n", irq);
-			return irq;
+			return;
 		}
 
 		ret = devm_request_irq(scm->dev, irq,
@@ -3568,14 +3568,7 @@ static int __qcom_multi_smc_init(struct qcom_scm *scm,
 				IRQF_ONESHOT, "qcom-scm", scm);
 		if (ret < 0) {
 			dev_err(scm->dev, "Failed to request qcom-scm irq: %d\n", ret);
-			return ret;
-		}
-
-		/* Return success if "no-multi-smc-support" property is present */
-		if (of_property_read_bool(scm->dev->of_node,
-				"qcom,no-multi-smc-support")) {
-			dev_info(scm->dev, "Multi smc is not supported\n");
-			return 0;
+			return;
 		}
 
 		/* Detect Multi SMC support present or not */
@@ -3585,7 +3578,6 @@ static int __qcom_multi_smc_init(struct qcom_scm *scm,
 					(int)scm->waitq.call_ctx_cnt);
 	}
 
-	return ret;
 }
 
 /**
@@ -3735,9 +3727,7 @@ static int qcom_scm_probe(struct platform_device *pdev)
 
 	__qcom_scm_init();
 	__get_convention();
-	ret  = __qcom_multi_smc_init(scm, pdev);
-	if (ret)
-		return ret;
+	__qcom_multi_smc_init(scm, pdev);
 
 	scm->restart_nb.notifier_call = qcom_scm_do_restart;
 	scm->restart_nb.priority = 130;

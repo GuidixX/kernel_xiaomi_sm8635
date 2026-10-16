@@ -3610,3 +3610,4 @@ module_init(i2c_dev_init);
 module_exit(i2c_dev_exit);
 MODULE_LICENSE("GPL");
 MODULE_ALIAS("platform:i2c_geni");
+MODULE_SOFTDEP("pre: i2c-dev");

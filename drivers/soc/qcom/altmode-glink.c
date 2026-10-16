@@ -29,6 +29,7 @@
 #define MAX_NUM_PORTS		4
 
 #define NUM_LOG_PAGES		10
+#define DP_IN_CLIENT_INDEX	BIT(7)
 
 #define IDR_KEY_GEN(svid, ind)	(((svid) << 8) | (ind))
 #define IDR_KEY(client)		\
@@ -394,6 +395,14 @@ struct altmode_client *altmode_register_client(struct device *client_dev,
 		return ERR_PTR(-ENOMEM);
 	}
 
+	/*
+	 * Update port index in case of MIPI bridge client, which
+	 * may have same SVID and port index as existing DisplayPort
+	 * client.
+	 */
+	if (!strcmp(amclient->data.name, "dp_in"))
+		amclient->port_index |= DP_IN_CLIENT_INDEX;
+
 	mutex_lock(&amdev->client_lock);
 	key = IDR_KEY(amclient);
 	rc = idr_alloc(&amdev->client_idr, amclient, key, key + 1, GFP_KERNEL);
@@ -561,6 +570,14 @@ static int altmode_callback(void *priv, void *data, size_t len)
 
 		notify_msg = data;
 		port_index = notify_msg->payload[0];
+
+		/*
+		 * Charger FW sets bit 5 of payload[8] to indicate
+		 * `dp_in` type transactions. If this bit is set,
+		 * the notification is meant for MIPI bridge client.
+		 */
+		if ((notify_msg->payload[8] >> 5) & 0x1)
+			port_index |= DP_IN_CLIENT_INDEX;
 
 		mutex_lock(&amdev->client_lock);
 		amclient = idr_find(&amdev->client_idr, IDR_KEY_GEN(svid,

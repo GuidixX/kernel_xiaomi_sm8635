@@ -3965,6 +3965,8 @@ static int spi_geni_hib_suspend(struct device *dev)
 	/* for GSI mode, GSI channels re-config required for Hibernation */
 	if (geni_mas->gsi_mode) {
 		geni_mas->is_deep_sleep = true;
+		geni_mas->cur_speed_hz = 0;
+		geni_mas->cur_word_len = 0;
 		SPI_LOG_ERR(geni_mas->ipc, true, dev,
 			    "%s: GSI channels re-config required for hibernation", __func__);
 	}

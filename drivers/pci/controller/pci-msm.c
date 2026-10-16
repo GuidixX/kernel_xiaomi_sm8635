@@ -225,6 +225,7 @@
 #define GEN1_SPEED (0x1)
 #define GEN2_SPEED (0x2)
 #define GEN3_SPEED (0x3)
+#define GEN4_SPEED (0x4)
 
 #define LINK_WIDTH_X1 (0x1)
 #define LINK_WIDTH_X2 (0x3)
@@ -595,9 +596,6 @@ enum msm_pcie_debugfs_option {
 	MSM_PCIE_ASSERT_PERST,
 	MSM_PCIE_DEASSERT_PERST,
 	MSM_PCIE_KEEP_RESOURCES_ON,
-	MSM_PCIE_FORCE_GEN1,
-	MSM_PCIE_FORCE_GEN2,
-	MSM_PCIE_FORCE_GEN3,
 	MSM_PCIE_TRIGGER_SBR,
 	MSM_PCIE_REMOTE_LOOPBACK,
 	MSM_PCIE_LOCAL_LOOPBACK,
@@ -627,12 +625,25 @@ static const char * const
 	"ASSERT PERST",
 	"DE-ASSERT PERST",
 	"SET KEEP_RESOURCES_ON FLAG",
-	"SET MAXIMUM LINK SPEED TO GEN 1",
-	"SET MAXIMUM LINK SPEED TO GEN 2",
-	"SET MAXIMUM LINK SPEED TO GEN 3",
 	"Trigger SBR",
 	"PCIE REMOTE LOOPBACK",
 	"PCIE LOCAL LOOPBACK",
+};
+
+enum msm_pcie_gen_speed_debugfs_option {
+	MSM_PCIE_FORCE_GEN1 = 1,
+	MSM_PCIE_FORCE_GEN2,
+	MSM_PCIE_FORCE_GEN3,
+	MSM_PCIE_FORCE_GEN4,
+	MSM_PCIE_MAX_GEN_SPEED_DEBUGFS_OPTION
+};
+
+static const char * const
+	msm_pcie_gen_speed_debugfs_option_desc[MSM_PCIE_MAX_GEN_SPEED_DEBUGFS_OPTION] = {
+		"SET MAXIMUM LINK SPEED TO GEN 1",
+		"SET MAXIMUM LINK SPEED TO GEN 2",
+		"SET MAXIMUM LINK SPEED TO GEN 3",
+		"SET MAXIMUM LINK SPEED TO GEN 4",
 };
 
 /* gpio info structure */
@@ -1167,6 +1178,7 @@ struct msm_pcie_dev_t {
 	struct msm_pcie_bw_scale_info_t *bw_scale;
 	u32 bw_gen_max;
 	u32 link_width_max;
+	u32 link_speed_max;
 
 	struct clk *rate_change_clk;
 	struct clk *pipe_clk_mux;
@@ -2272,6 +2284,8 @@ static void msm_pcie_show_status(struct msm_pcie_dev_t *dev)
 		dev->current_link_width);
 	PCIE_DBG_FS(dev, "link_width_max: %d\n",
 		dev->link_width_max);
+	PCIE_DBG_FS(dev, "link_speed_max: %d\n",
+		dev->link_speed_max);
 	PCIE_DBG_FS(dev, "link_turned_on_counter: %lu\n",
 		dev->link_turned_on_counter);
 	PCIE_DBG_FS(dev, "link_turned_off_counter: %lu\n",
@@ -2572,24 +2586,6 @@ static void msm_pcie_sel_debug_testcase(struct msm_pcie_dev_t *dev,
 			dev->rc_idx);
 		msm_pcie_keep_resources_on |= BIT(dev->rc_idx);
 		break;
-	case MSM_PCIE_FORCE_GEN1:
-		PCIE_DBG_FS(dev,
-			"\n\nPCIe: RC%d: set target speed to Gen 1\n\n",
-			dev->rc_idx);
-		dev->target_link_speed = GEN1_SPEED;
-		break;
-	case MSM_PCIE_FORCE_GEN2:
-		PCIE_DBG_FS(dev,
-			"\n\nPCIe: RC%d: set target speed to Gen 2\n\n",
-			dev->rc_idx);
-		dev->target_link_speed = GEN2_SPEED;
-		break;
-	case MSM_PCIE_FORCE_GEN3:
-		PCIE_DBG_FS(dev,
-			"\n\nPCIe: RC%d: set target speed to Gen 3\n\n",
-			dev->rc_idx);
-		dev->target_link_speed = GEN3_SPEED;
-		break;
 	case MSM_PCIE_TRIGGER_SBR:
 		PCIE_DBG_FS(dev, "\n\nPCIe: RC%d: Trigger SBR\n\n",
 			dev->rc_idx);
@@ -2644,6 +2640,38 @@ static void msm_pcie_sel_debug_testcase(struct msm_pcie_dev_t *dev,
 		PCIE_DBG_FS(dev, "Invalid testcase: %d.\n", testcase);
 		break;
 	}
+}
+
+static void msm_pcie_set_gen_speed(struct msm_pcie_dev_t *dev)
+{
+	struct pci_dev *pci_dev = dev->dev;
+	u32 current_link_width = ((readl_relaxed(dev->dm_core +
+				PCIE20_CAP_LINKCTRLSTATUS) >> 16) &
+				PCI_EXP_LNKSTA_NLW) >> PCI_EXP_LNKSTA_NLW_SHIFT;
+
+	msm_pcie_set_link_bandwidth(pci_dev, dev->target_link_speed, current_link_width);
+}
+
+static void msm_pcie_sel_gen_speed_debug_testcase(struct msm_pcie_dev_t *dev,
+						u32 testcase)
+{
+	if (testcase < MSM_PCIE_FORCE_GEN1 ||
+			testcase > (MSM_PCIE_MAX_GEN_SPEED_DEBUGFS_OPTION - 1)) {
+		PCIE_DBG_FS(dev, "RC:%d, Invalid input for Gen Speed change:%d\n",
+			dev->rc_idx, testcase);
+		return;
+	}
+
+	if (testcase > dev->link_speed_max) {
+		PCIE_DBG_FS(dev, "RC:%d, Target doesn't support Gen Speed:%d\n",
+			dev->rc_idx, testcase);
+		return;
+	}
+	dev->target_link_speed = testcase;
+	if (dev->enumerated && !dev->suspending && !dev->user_suspend)
+		msm_pcie_set_gen_speed(dev);
+	PCIE_DBG_FS(dev, "\n\nPCIe: RC:%d: set target speed to Gen Speed:%d\n",
+			dev->rc_idx, dev->target_link_speed);
 }
 
 int msm_pcie_debug_info(struct pci_dev *dev, u32 option, u32 base,
@@ -3066,6 +3094,7 @@ static struct dentry *dfile_rc_sel;
 static struct dentry *dfile_case;
 static struct dentry *dfile_base_sel;
 static struct dentry *dfile_linkdown_panic;
+static struct dentry *dfile_gen_speed_sel;
 static struct dentry *dfile_wr_offset;
 static struct dentry *dfile_wr_mask;
 static struct dentry *dfile_wr_value;
@@ -3144,6 +3173,52 @@ static const struct file_operations msm_pcie_debugfs_case_ops = {
 	.release = single_release,
 	.read = seq_read,
 	.write = msm_pcie_debugfs_case_select,
+};
+
+static int msm_pcie_debugfs_gen_speed_select_show(struct seq_file *m, void *v)
+{
+	int i;
+
+	seq_puts(m, "Options:\n");
+	for (i = 0; i < MSM_PCIE_MAX_GEN_SPEED_DEBUGFS_OPTION - 1; i++)
+		seq_printf(m, "\t%d:\t %s\n", i + 1,
+			msm_pcie_gen_speed_debugfs_option_desc[i]);
+
+	return 0;
+}
+
+static int msm_pcie_debugfs_gen_speed_select_open(struct inode *inode,
+							struct file *file)
+{
+	return single_open(file, msm_pcie_debugfs_gen_speed_select_show, NULL);
+}
+
+static ssize_t msm_pcie_debugfs_gen_speed_select(struct file *file,
+				const char __user *buf,
+				size_t count, loff_t *ppos)
+{
+	int i, ret;
+	unsigned int gen_speed = 0;
+
+	ret = msm_pcie_debugfs_parse_input(buf, count, &gen_speed);
+	if (ret)
+		return ret;
+
+	pr_alert("PCIe: GEN SPEED: %d\n", gen_speed);
+
+	for (i = 0; i < MAX_RC_NUM; i++) {
+		if (rc_sel & BIT(i))
+			msm_pcie_sel_gen_speed_debug_testcase(msm_pcie_dev[i], gen_speed);
+	}
+
+	return count;
+}
+
+static const struct file_operations msm_pcie_debugfs_gen_speed_select_ops = {
+	.open = msm_pcie_debugfs_gen_speed_select_open,
+	.release = single_release,
+	.read = seq_read,
+	.write = msm_pcie_debugfs_gen_speed_select,
 };
 
 static int msm_pcie_debugfs_rc_select_show(struct seq_file *m, void *v)
@@ -3522,6 +3597,14 @@ static void msm_pcie_debugfs_init(void)
 					&msm_pcie_debugfs_linkdown_panic_ops);
 	if (!dfile_linkdown_panic || IS_ERR(dfile_linkdown_panic)) {
 		pr_err("PCIe: fail to create the file for debug_fs linkdown_panic.\n");
+		goto err;
+	}
+
+	dfile_gen_speed_sel = debugfs_create_file("gen_speed_sel", 0664,
+					dent_msm_pcie, NULL,
+					&msm_pcie_debugfs_gen_speed_select_ops);
+	if (!dfile_gen_speed_sel || IS_ERR(dfile_gen_speed_sel)) {
+		pr_err("PCIe: fail to create the file for debug_fs gen_speed_sel.\n");
 		goto err;
 	}
 
@@ -6520,11 +6603,15 @@ static int msm_pcie_enable_link(struct msm_pcie_dev_t *dev)
 		gpio_set_value(dev->gpio[MSM_PCIE_GPIO_EP].num,
 				dev->gpio[MSM_PCIE_GPIO_EP].on);
 
-	dev->link_width_max =
-		(readl_relaxed(dev->dm_core + PCIE20_CAP + PCI_EXP_LNKCAP) &
-			       PCI_EXP_LNKCAP_MLW) >> PCI_EXP_LNKSTA_NLW_SHIFT;
+	val = readl_relaxed(dev->dm_core + PCIE20_CAP + PCI_EXP_LNKCAP);
+	dev->link_width_max = (val & PCI_EXP_LNKCAP_MLW) >>
+				PCI_EXP_LNKSTA_NLW_SHIFT;
 	PCIE_DBG(dev, "PCIe: RC%d: Maximum supported link width is %d\n",
-		 dev->rc_idx, dev->link_width_max);
+		dev->rc_idx, dev->link_width_max);
+
+	dev->link_speed_max = val & PCI_EXP_LNKCAP_SLS;
+	PCIE_DBG(dev, "PCIe: RC%d: Maximum supported link speed is %d\n",
+		dev->rc_idx, dev->link_speed_max);
 
 	if (dev->target_link_width) {
 		ret = msm_pcie_set_link_width(dev, dev->target_link_width <<
@@ -9460,8 +9547,10 @@ static int msm_pcie_cesta_init(struct msm_pcie_dev_t *pcie_dev,
 	pcie_dev->crm_dev = crm_get_device("pcie_crm");
 
 	if (IS_ERR(pcie_dev->crm_dev)) {
-		PCIE_ERR(pcie_dev, "PCIe: RC%d: fail to get crm_dev\n",
-				pcie_dev->rc_idx);
+		ret = PTR_ERR(pcie_dev->crm_dev);
+		pcie_dev->crm_dev = NULL;
+		PCIE_ERR(pcie_dev, "PCIe: RC%d: fail to get crm_dev: %d\n",
+				pcie_dev->rc_idx, ret);
 		return ret;
 	}
 
@@ -10027,6 +10116,9 @@ int msm_pcie_prevent_l1(struct pci_dev *pci_dev)
 
 	msm_pcie_write_mask(pcie_dev->parf + PCIE20_PARF_PM_CTRL, 0, BIT(5));
 
+	/* Disable L1 on EP and RP for LTSSM stability during link state poll */
+	msm_pcie_config_l1_disable_all(pcie_dev, pcie_dev->dev->bus);
+
 	/* confirm link is in L0/L0s */
 	while (!msm_pcie_check_ltssm_state(pcie_dev, MSM_PCIE_LTSSM_L0) &&
 		!msm_pcie_check_ltssm_state(pcie_dev, MSM_PCIE_LTSSM_L0S)) {
@@ -10058,8 +10150,6 @@ int msm_pcie_prevent_l1(struct pci_dev *pci_dev)
 
 		usleep_range(100, 105);
 	}
-
-	msm_pcie_config_l1_disable_all(pcie_dev, pcie_dev->dev->bus);
 
 	PCIE_DBG2(pcie_dev, "PCIe: RC%d: %02x:%02x.%01x: exit\n",
 		pcie_dev->rc_idx, pci_dev->bus->number,
@@ -11850,6 +11940,12 @@ int msm_pcie_pm_control(enum msm_pcie_pm_opt pm_opt, u32 busnr, void *user,
 			/* make sure enable pc happens asap */
 			flush_work(&pcie_dev->drv_enable_pc_work);
 		}
+		mutex_unlock(&pcie_dev->drv_pc_lock);
+		break;
+	case MSM_PCIE_ENABLE_ASPM:
+		mutex_lock(&pcie_dev->drv_pc_lock);
+		msm_pcie_check_l1ss_support_all(pcie_dev);
+		msm_pcie_config_link_pm(pcie_dev, true);
 		mutex_unlock(&pcie_dev->drv_pc_lock);
 		break;
 	default:

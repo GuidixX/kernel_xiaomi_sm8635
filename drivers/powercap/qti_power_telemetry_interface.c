@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2022-2024 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  */
 
 #define pr_fmt(fmt) "%s:%s " fmt, KBUILD_MODNAME, __func__
@@ -88,6 +88,19 @@ static int qpt_get_power_uw(struct powercap_zone *pcz, u64 *power_uw)
 	return 0;
 }
 
+static int qpt_get_energy_uj(struct powercap_zone *pcz, u64 *energy_uj)
+{
+	struct qpt_device *qpt_dev = to_qpt_dev_pz(pcz);
+	struct qpt_priv *qpt = qpt_dev->priv;
+
+	if (qpt->ops->get_energy)
+		qpt->ops->get_energy(qpt_dev, energy_uj);
+	else
+		return -EOPNOTSUPP;
+
+	return 0;
+}
+
 static int qpt_release_zone(struct powercap_zone *pcz)
 {
 	struct qpt_device *qpt_dev = to_qpt_dev_pz(pcz);
@@ -139,6 +152,7 @@ static struct powercap_zone_constraint_ops constraint_ops = {
 static struct powercap_zone_ops zone_ops = {
 	.get_max_power_range_uw = qpt_get_max_power_range_uw,
 	.get_power_uw = qpt_get_power_uw,
+	.get_energy_uj = qpt_get_energy_uj,
 	.release = qpt_release_zone,
 };
 

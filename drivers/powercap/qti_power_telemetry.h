@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * Copyright (c) 2022-2024 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  */
 
 #ifndef __QCOM_QPT_H__
@@ -102,6 +102,9 @@ struct qpt_sdam {
  * @data_offset:	qpt channel power data offset from DATA sdam base
  * @last_data:	qpt channel last 1S data
  * @last_data_uw:	qpt channel last 10S average data
+ * @total_energy_uj:	qpt channel cumulative energy in microjoules
+ * @prev_last_data_uw:	qpt channel previous power reading for energy calculation
+ * @prev_read_ts:	qpt channel previous read timestamp for energy calculation
  * @lock:	lock to protect multiple client read concurrently
  */
 struct qpt_device {
@@ -116,6 +119,9 @@ struct qpt_device {
 	uint8_t				data_offset;
 	uint16_t			last_data;
 	u64				last_data_uw;
+	u64				total_energy_uj;
+	u64				prev_last_data_uw;
+	u64				prev_read_ts;
 	struct mutex			lock;
 };
 
@@ -174,6 +180,7 @@ struct qpt_priv {
  * @init:		QPT hardware init function
  * @get_mode:		Function to get current QPT operation mode
  * @get_power:		Function to get power for QPT channel in us for a given type
+ * @get_energy:		Function to get cumulative energy for QPT channel in uj
  * @get_max_power:	Function to get max power which QPT channel can deliver
  * @release:		Function to clear all QPT data on exit
  * @suspend:		Function to execute QPT during suspend callback if any
@@ -182,6 +189,7 @@ struct qpt_priv {
 struct qpt_ops {
 	int (*init)(struct qpt_priv *priv);
 	void (*get_power)(struct qpt_device *qpt_dev, u64 *power);
+	void (*get_energy)(struct qpt_device *qpt_dev, u64 *energy);
 	int (*get_max_power)(const struct qpt_device *qpt_dev, u64 *max_power);
 	void (*release)(struct qpt_priv *qpt);
 	int (*suspend)(struct qpt_priv *qpt);

@@ -33,6 +33,8 @@
 #define HGSL_DRAWOBJ_END_OF_FRAME      HGSL_CMDBATCH_END_OF_FRAME
 #define HGSL_DRAWOBJ_SYNC              HGSL_CMDBATCH_SYNC
 
+#define hgsl_drawobj_profiling_buffer hgsl_cmdbatch_profiling_buffer
+
 #define HGSL_TIMELINE_NAME_LEN 64
 
 #define HGSL_ISYNC_32BITS_TIMELINE 0

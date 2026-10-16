@@ -466,7 +466,7 @@ config BATTERY_TWL4030_MADC
 
 config QTI_BATTERY_CHARGER
 	tristate "QTI Glink battery charger"
-	depends on QTI_PMIC_GLINK
+	depends on QTI_PMIC_GLINK && EXTCON
 	help
 	  Say Y here to enable Qualcomm Technologies, Inc. battery charger
 	  driver which interfaces with the charger firmware running on the
@@ -476,6 +476,16 @@ config QTI_BATTERY_CHARGER
 
 	  To compile the driver as a module, choose M here: the module will be
 	  called qti_battery_charger.
+
+config QTI_TYPEC_CLASS
+	tristate "Enable QTI Type-C class support for battery charger"
+	depends on QTI_BATTERY_CHARGER && TYPEC
+	help
+	  Say 'y' here to enable Type-C class integration within the QTI
+	  battery charger driver. This allows the charger driver to register
+	  and manage Type-C partner connections (device/host) via the QTI
+	  Type-C class interface. Required for micro-USB connector types that
+	  rely on extcon and Type-C class notifications for USB role switching.
 
 config CHARGER_88PM860X
 	tristate "Marvell 88PM860x Charger driver"

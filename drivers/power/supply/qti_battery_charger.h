@@ -2,8 +2,8 @@
 /*
  * Copyright (c) 2021 The Linux Foundation. All rights reserved.
  */
-#ifndef __QTI_TYPEC_CLASS_H
-#define __QTI_TYPEC_CLASS_H
+#ifndef __QTI_BATTERY_CHARGER_H
+#define __QTI_BATTERY_CHARGER_H
 
 enum charger_notifier_events {
 	/* thermal board temp */
@@ -38,4 +38,4 @@ extern int charger_reg_notifier(struct notifier_block *nb);
 extern int charger_unreg_notifier(struct notifier_block *nb);
 extern int charger_notifier_call_chain(unsigned long event,int val);
 
-#endif /* __QTI_TYPEC_CLASS_H */
+#endif /* __QTI_BATTERY_CHARGER_H */

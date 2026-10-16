@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2013-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2022-2024 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  */
 
 #define pr_fmt(fmt) "qcom-bwmon: " fmt
@@ -723,6 +723,24 @@ out:
 	return dst_vote;
 }
 
+static inline u64 mbps_to_khz(u64 val, u32 width)
+{
+#ifdef CONFIG_ARM64
+	return MBPS_TO_KHZ(val, width);
+#else
+	return div_u64(val * 1000, width);
+#endif
+}
+
+static inline u64 khz_to_mbps(u64 val, u32 width)
+{
+#ifdef CONFIG_ARM64
+	return KHZ_TO_MBPS(val, width);
+#else
+	return div_u64((u64)val * width, 1000);
+#endif
+}
+
 /*
  * Governor function that computes new target frequency
  * based on bw measurement (mbps) and updates cur_freq (khz).
@@ -736,29 +754,31 @@ static bool bwmon_update_cur_freq(struct hwmon_node *node)
 	u32 primary_mbps;
 
 	get_bw_and_set_irq(node, &new_freq);
-
 	/* first convert freq from mbps to khz */
-	new_freq.ab = MBPS_TO_KHZ(new_freq.ab, hw->dcvs_width);
-	new_freq.ib = MBPS_TO_KHZ(new_freq.ib, hw->dcvs_width);
+	new_freq.ab = mbps_to_khz(new_freq.ab, hw->dcvs_width);
+	new_freq.ib = mbps_to_khz(new_freq.ib, hw->dcvs_width);
 	new_freq.ib = max(new_freq.ib, node->min_freq);
 	new_freq.ib = min(new_freq.ib, node->max_freq);
-	primary_mbps = KHZ_TO_MBPS(new_freq.ib, hw->dcvs_width);
+	primary_mbps = khz_to_mbps(new_freq.ib, hw->dcvs_width);
 
 	if (new_freq.ib != node->cur_freqs[0].ib ||
-			new_freq.ab != node->cur_freqs[0].ab) {
+	    new_freq.ab != node->cur_freqs[0].ab) {
 		node->cur_freqs[0].ib = new_freq.ib;
 		node->cur_freqs[0].ab = new_freq.ab;
+
 		if (hw->second_vote_supported) {
 			if (hw->second_map)
-				node->cur_freqs[1].ib = get_dst_from_map(hw,
-								new_freq.ib);
+				node->cur_freqs[1].ib =
+					get_dst_from_map(hw, new_freq.ib);
 			else if (hw->second_dcvs_width)
-				node->cur_freqs[1].ib = MBPS_TO_KHZ(primary_mbps,
-							hw->second_dcvs_width);
+				node->cur_freqs[1].ib =
+					mbps_to_khz(primary_mbps,
+						    hw->second_dcvs_width);
 			else
 				node->cur_freqs[1].ib = 0;
+
 			node->cur_freqs[1].ib = min(node->cur_freqs[1].ib,
-							hw->second_vote_limit);
+					hw->second_vote_limit);
 		}
 		return true;
 	}
@@ -857,8 +877,8 @@ static int start_monitor(struct bw_hwmon *hwmon)
 
 	node->prev_ts = ktime_get();
 	node->prev_ab = 0;
-	mbps = KHZ_TO_MBPS(node->cur_freqs[0].ib, hwmon->dcvs_width) *
-					node->io_percent / 100;
+	mbps = div_u64(khz_to_mbps(node->cur_freqs[0].ib,
+		hwmon->dcvs_width) * node->io_percent, 100);
 	hwmon->up_wake_mbps = mbps;
 	hwmon->down_wake_mbps = MIN_MBPS;
 	ret = hwmon->start_hwmon(hwmon, mbps);

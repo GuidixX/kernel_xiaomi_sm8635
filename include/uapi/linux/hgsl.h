@@ -23,6 +23,14 @@ struct hgsl_mem_object {
 	__u64 sizedwords;
 };
 
+struct hgsl_cmdbatch_profiling_buffer {
+	__u64 wall_clock_s;
+	__u64 wall_clock_ns;
+	__u64 gpu_ticks_queued;
+	__u64 gpu_ticks_submitted;
+	__u64 gpu_ticks_retired;
+};
+
 #define HGSL_IOCTL_BASE	'h'
 #define HGSL_IORW(n, t)	_IOWR(HGSL_IOCTL_BASE, n, t)
 #define HGSL_IOW(n, t)	_IOW(HGSL_IOCTL_BASE, n, t)

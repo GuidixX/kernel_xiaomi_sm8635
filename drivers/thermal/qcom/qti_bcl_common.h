@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * Copyright (c) 2024-2025, Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  */
 
 #include <linux/debugfs.h>
@@ -88,6 +88,7 @@ struct bcl_device {
 	uint8_t				enable_bpm;
 	void				*ipc_log;
 	bool				ibat_ccm_enabled;
+	bool				ibat_ccm_lando_enabled;
 	bool				ibat_use_qg_adc;
 	bool				no_bit_shift;
 	uint32_t			ibat_ext_range_factor;

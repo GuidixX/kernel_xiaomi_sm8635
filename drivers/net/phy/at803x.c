@@ -461,7 +461,8 @@ static int at803x_set_wol(struct phy_device *phydev,
 				      mac[(i * 2) + 1] | (mac[(i * 2)] << 8));
 
 		/* Enable WOL function for 1588 */
-		if (phydev->drv->phy_id == ATH8031_PHY_ID) {
+		if (phydev->drv->phy_id == ATH8031_PHY_ID ||
+		    phydev->drv->phy_id == QCA8081_PHY_ID) {
 			ret = phy_modify_mmd(phydev, MDIO_MMD_PCS,
 					     AT803X_PHY_MMD3_WOL_CTRL,
 					     0, AT803X_WOL_EN);
@@ -474,7 +475,8 @@ static int at803x_set_wol(struct phy_device *phydev,
 			return ret;
 	} else {
 		/* Disable WoL function for 1588 */
-		if (phydev->drv->phy_id == ATH8031_PHY_ID) {
+		if (phydev->drv->phy_id == ATH8031_PHY_ID ||
+		    phydev->drv->phy_id == QCA8081_PHY_ID) {
 			ret = phy_modify_mmd(phydev, MDIO_MMD_PCS,
 					     AT803X_PHY_MMD3_WOL_CTRL,
 					     AT803X_WOL_EN, 0);

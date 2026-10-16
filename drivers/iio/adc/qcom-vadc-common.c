@@ -621,6 +621,7 @@ static const struct u32_fract adc5_prescale_ratios[] = {
 	{ .numerator = 10, .denominator = 81 },
 	{ .numerator =  1, .denominator = 10 },
 	{ .numerator =  1, .denominator = 16 },
+	{ .numerator =  10, .denominator = 25 },	/* PMW6100_USB_IN_I*/
 	{ .numerator = 40, .denominator = 41 },		/* PM7_SMB_TEMP */
 	/* Prescale ratios for current channels below */
 	{ .numerator = 32, .denominator = 100 },	/* IIN_FB, IIN_SMB */
@@ -709,6 +710,10 @@ static int qcom_vadc_scale_hw_pm7_chg_temp(
 				const struct u32_fract *prescale,
 				const struct adc5_data *data,
 				u16 adc_code, int *result_mdec);
+static int qcom_vadc_scale_hw_pmw6100_chg_temp(
+				const struct u32_fract *prescale,
+				const struct adc5_data *data,
+				u16 adc_code, int *result_mdec);
 static int qcom_vadc_scale_hw_calib_die_temp(
 				const struct u32_fract *prescale,
 				const struct adc5_data *data,
@@ -759,6 +764,7 @@ static struct qcom_adc5_scale_type scale_adc5_fn[] = {
 	[SCALE_HW_CALIB_PM5_GEN3_USB_IN_I] = {qcom_adc5_gen3_scale_hw_calib_usb_in_current},
 	[SCALE_HW_CALIB_PM7_SMB_TEMP] = {qcom_vadc_scale_hw_pm7_smb_temp},
 	[SCALE_HW_CALIB_PM7_CHG_TEMP] = {qcom_vadc_scale_hw_pm7_chg_temp},
+	[SCALE_HW_CALIB_PMW6100_CHG_TEMP] = {qcom_vadc_scale_hw_pmw6100_chg_temp},
 	[SCALE_HW_CALIB_PM5_GEN4_BATT_THERM_10K] = {qcom_adc5_gen4_scale_hw_calib_batt_therm_10},
 	[SCALE_HW_CALIB_PM5_GEN4_BATT_ID_10K] = {qcom_adc5_gen4_scale_hw_calib_batt_id_10},
 };
@@ -1174,6 +1180,26 @@ static int qcom_vadc_scale_hw_pm7_chg_temp(
 
 	/* T(C) = Vadc/0.0033 – 277.12 */
 	temp = div_s64((30303LL * result_uv) - (27712 * 1000000LL), 100000);
+	pr_debug("adc_code: %u result_uv: %d temp: %lld\n", adc_code, result_uv,
+		temp);
+	*result_mdec = temp > 0 ? temp : 0;
+
+	return 0;
+}
+
+static int qcom_vadc_scale_hw_pmw6100_chg_temp(
+				const struct u32_fract *prescale,
+				const struct adc5_data *data,
+				u16 adc_code, int *result_mdec)
+{
+	s64 temp;
+	int result_uv;
+
+	result_uv = qcom_vadc_scale_code_voltage_factor(adc_code,
+				prescale, data, 1);
+
+	/* T(C) = 377.5 - (Vadc/ 0.004) */
+	temp = div_s64((37750LL * 1000000LL) - (25000LL * result_uv), 100000);
 	pr_debug("adc_code: %u result_uv: %d temp: %lld\n", adc_code, result_uv,
 		temp);
 	*result_mdec = temp > 0 ? temp : 0;

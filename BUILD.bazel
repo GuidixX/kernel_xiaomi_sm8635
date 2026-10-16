@@ -16,7 +16,9 @@ load(
     "kernel_modules_install",
     "merged_kernel_uapi_headers",
 )
+load(":consolidate.bzl", "define_consolidate")
 load(":modules.bzl", "get_gki_modules_list")
+load(":msm_platforms.bzl", "define_msm_platforms")
 
 package(
     default_visibility = [
@@ -575,11 +577,7 @@ kernel_build(
     strip_modules = True,
 )
 
-load(":consolidate.bzl", "define_consolidate")
-
 define_consolidate()
-
-load(":msm_platforms.bzl", "define_msm_platforms")
 
 define_msm_platforms()
 

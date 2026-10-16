@@ -69,6 +69,7 @@ static enum cpuhp_state hp_online;
 struct etm4_init_arg {
 	unsigned int		pid;
 	struct etmv4_drvdata	*drvdata;
+	struct device		*dev;
 	struct csdev_access	*csa;
 };
 
@@ -1162,9 +1163,11 @@ static void etm4_init_arch_data(void *info)
 	struct etm4_init_arg *init_arg = info;
 	struct etmv4_drvdata *drvdata;
 	struct csdev_access *csa;
+	struct device *dev;
 	int i;
 
 	drvdata = init_arg->drvdata;
+	dev = init_arg->dev;
 	csa = init_arg->csa;
 
 	/*
@@ -1174,6 +1177,11 @@ static void etm4_init_arch_data(void *info)
 	 */
 	if (!etm4_init_csdev_access(drvdata, csa))
 		return;
+
+	/* TRCPDCR is not accessible with system instructions. */
+	if (!csa->io_mem ||
+	    fwnode_property_present(dev_fwnode(dev), "qcom,skip-power-up"))
+		drvdata->skip_power_up = true;
 
 	/* Detect the support for OS Lock before we actually use it */
 	etm_detect_os_lock(drvdata, csa);
@@ -2029,6 +2037,7 @@ static int etm4_probe(struct device *dev, void __iomem *base, u32 etm_pid)
 		return drvdata->cpu;
 
 	init_arg.drvdata = drvdata;
+	init_arg.dev = dev;
 	init_arg.csa = &desc.access;
 	init_arg.pid = etm_pid;
 
@@ -2038,11 +2047,6 @@ static int etm4_probe(struct device *dev, void __iomem *base, u32 etm_pid)
 
 	if (!drvdata->arch)
 		return -EINVAL;
-
-	/* TRCPDCR is not accessible with system instructions. */
-	if (!desc.access.io_mem ||
-	    fwnode_property_present(dev_fwnode(dev), "qcom,skip-power-up"))
-		drvdata->skip_power_up = true;
 
 	major = ETM_ARCH_MAJOR_VERSION(drvdata->arch);
 	minor = ETM_ARCH_MINOR_VERSION(drvdata->arch);

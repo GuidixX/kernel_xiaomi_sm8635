@@ -342,6 +342,7 @@ static void drawobj_add_profiling_buffer(struct hgsl_priv *hgsl_priv,
 {
 	struct hgsl_drawobj *drawobj = DRAWOBJ(cmdobj);
 	struct hgsl_mem_node *node_found = NULL;
+	u64 start = 0, end = 0;
 
 	if (!(drawobj->flags & HGSL_DRAWOBJ_PROFILING))
 		return;
@@ -356,6 +357,14 @@ static void drawobj_add_profiling_buffer(struct hgsl_priv *hgsl_priv,
 	if (!node_found)
 		node_found = hgsl_mem_find_node_locked(&hgsl_priv->mem_mapped,
 					gpuaddr, size, false);
+	if (node_found) {
+		start = id ? (node_found->memdesc.gpuaddr + offset) : gpuaddr;
+		end = node_found->memdesc.gpuaddr + node_found->memdesc.size64;
+		if (offset > node_found->memdesc.size64 ||
+				size > (end - gpuaddr) ||
+				sizeof(struct hgsl_drawobj_profiling_buffer) > (end - start))
+			node_found = NULL;
+	}
 
 	mutex_unlock(&hgsl_priv->lock);
 	if (!node_found) {
@@ -364,8 +373,7 @@ static void drawobj_add_profiling_buffer(struct hgsl_priv *hgsl_priv,
 		return;
 	}
 
-	cmdobj->profiling_mem_gpuaddr = id ?
-		(node_found->memdesc.gpuaddr + offset) : gpuaddr;
+	cmdobj->profiling_mem_gpuaddr = start;
 	cmdobj->profiling_mem_node = node_found;
 }
 
