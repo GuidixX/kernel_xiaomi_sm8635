@@ -44,6 +44,9 @@ make -j$(nproc --all) O=out \
                       OBJDUMP=llvm-objdump \
                       STRIP=llvm-strip
 
+BUILD_END=$(date +"%s")
+BUILD_DURATION=$((BUILD_END - BUILD_START))
+
 TIME="$(date "+%Y%m%d-%H%M%S")"
 mkdir -p tmp
 cp -fp $ZIMAGE_DIR/Image.gz tmp
@@ -54,3 +57,7 @@ cd ..
 cp -fp tmp/tmp.zip Chidori-Kernel-V2.2-peridot-$TIME.zip
 rm -rf tmp
 echo $TIME
+printf 'Kernel build time: %02d:%02d:%02d (hh:mm:ss)\n' \
+    "$((BUILD_DURATION / 3600))" \
+    "$((BUILD_DURATION / 60 % 60))" \
+    "$((BUILD_DURATION % 60))"
