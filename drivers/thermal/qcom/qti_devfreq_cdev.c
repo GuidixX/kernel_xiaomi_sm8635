@@ -16,24 +16,15 @@
 #include <linux/thermal.h>
 #include <linux/workqueue.h>
 
-#ifdef CONFIG_KPROFILES
-extern unsigned int KP_MODE_CHANGE;
-extern int kp_active_mode(void);
-extern int kp_notifier_register_client(struct notifier_block *nb);
-extern int kp_notifier_unregister_client(struct notifier_block *nb);
+#if IS_REACHABLE(CONFIG_KPROFILES)
+#include <linux/kprofiles.h>
+#include <linux/mutex.h>
 #endif
 
 #define MAX_RETRY_CNT 20
 #define RETRY_DELAY msecs_to_jiffies(1000)
 #define DEVFREQ_CDEV_NAME "gpu"
 #define DEVFREQ_CDEV "qcom-devfreq-cdev"
-/*
- * Reduce aggressive mid-level GPU throttling to preserve frame pacing, while
- * leaving the last critical states unmodified for thermal safety.
- */
-#define DEVFREQ_SOFT_THROTTLE_START_STATE 1
-#define DEVFREQ_SOFT_THROTTLE_DIVIDER 2
-#define DEVFREQ_CRITICAL_TAIL_STATES 2
 
 struct devfreq_cdev_device {
 	struct device_node *np;
@@ -46,71 +37,67 @@ struct devfreq_cdev_device {
 	struct dev_pm_qos_request qos_max_freq_req;
 	struct delayed_work register_work;
 	struct thermal_cooling_device *cdev;
-#ifdef CONFIG_KPROFILES
-	/** kp_perf_override: true when kprofiles performance mode is active */
-	bool kp_perf_override;
-	/** kp_nb: kprofiles notifier for GPU max freq override */
+#if IS_REACHABLE(CONFIG_KPROFILES)
+	struct dev_pm_qos_request kp_max_freq_req;
+	struct mutex kp_lock;
 	struct notifier_block kp_nb;
 #endif
 };
 
 static struct devfreq_cdev_device *devfreq_cdev;
 
-#ifdef CONFIG_KPROFILES
+#if IS_REACHABLE(CONFIG_KPROFILES)
+/* Profile and thermal limits are independent votes in the devfreq QoS list. */
 static int devfreq_cdev_kp_notifier_cb(struct notifier_block *nb,
-					unsigned long action, void *data)
+				     unsigned long action, void *data)
 {
 	struct devfreq_cdev_device *cdev_data =
 		container_of(nb, struct devfreq_cdev_device, kp_nb);
-	unsigned int mode;
-	int ret;
+	unsigned long limit = PM_QOS_MAX_FREQUENCY_DEFAULT_VALUE;
+	unsigned long target;
+	int i, ret;
 
 	if (action != KP_MODE_CHANGE)
 		return NOTIFY_DONE;
 
-	mode = (unsigned int)(uintptr_t)data;
-	cdev_data->kp_perf_override = (mode == 3); /* Performance mode */
-
-	/*
-	 * In performance mode: immediately force state 0 (max GPU freq),
-	 * bypassing the thermal daemon's proactive throttling policy.
-	 * The thermal daemon keeps its state internally; normal throttling
-	 * resumes as soon as performance mode is exited.
-	 */
-	if (cdev_data->kp_perf_override && cdev_data->freq_table &&
-	    cdev_data->cur_state != 0) {
-		ret = dev_pm_qos_update_request(&cdev_data->qos_max_freq_req,
-						cdev_data->freq_table[0]);
-		if (ret >= 0)
-			cdev_data->cur_state = 0;
+	mutex_lock(&cdev_data->kp_lock);
+	/* Read inside the lock so initial application cannot race a notification. */
+	if (kp_active_mode() == KP_MODE_BATTERY) {
+		target = cdev_data->freq_table[0] / 5 * 4;
+		for (i = 0; i < cdev_data->max_state; i++)
+			if (cdev_data->freq_table[i] <= target)
+				break;
+		limit = cdev_data->freq_table[i];
 	}
-
+	ret = dev_pm_qos_update_request(&cdev_data->kp_max_freq_req, limit);
+	mutex_unlock(&cdev_data->kp_lock);
+	if (ret < 0)
+		dev_warn_ratelimited(cdev_data->dev, "GPU profile vote failed: %d\n", ret);
 	return NOTIFY_OK;
 }
-#endif /* CONFIG_KPROFILES */
-static unsigned long devfreq_cdev_map_state(struct devfreq_cdev_device *cdev_data,
-					    unsigned long state)
+
+static void devfreq_cdev_kp_init(struct devfreq_cdev_device *cdev_data)
 {
-	unsigned long max_state = cdev_data->max_state;
-	unsigned long critical_first;
-	unsigned long mapped;
+	int ret;
 
-	if (state <= DEVFREQ_SOFT_THROTTLE_START_STATE)
-		return state;
-
-	if ((max_state + 1) <= DEVFREQ_CRITICAL_TAIL_STATES)
-		return state;
-
-	critical_first = max_state - DEVFREQ_CRITICAL_TAIL_STATES + 1;
-	if (state >= critical_first)
-		return state;
-
-	mapped = DEVFREQ_SOFT_THROTTLE_START_STATE +
-		DIV_ROUND_UP(state - DEVFREQ_SOFT_THROTTLE_START_STATE,
-			     DEVFREQ_SOFT_THROTTLE_DIVIDER);
-
-	return min(mapped, critical_first - 1);
+	mutex_init(&cdev_data->kp_lock);
+	ret = dev_pm_qos_add_request(cdev_data->dev, &cdev_data->kp_max_freq_req,
+				    DEV_PM_QOS_MAX_FREQUENCY,
+				    PM_QOS_MAX_FREQUENCY_DEFAULT_VALUE);
+	if (ret < 0)
+		goto error;
+	cdev_data->kp_nb.notifier_call = devfreq_cdev_kp_notifier_cb;
+	ret = kp_notifier_register_client(&cdev_data->kp_nb);
+	if (ret) {
+		dev_pm_qos_remove_request(&cdev_data->kp_max_freq_req);
+		goto error;
+	}
+	devfreq_cdev_kp_notifier_cb(&cdev_data->kp_nb, KP_MODE_CHANGE, NULL);
+	return;
+error:
+	dev_warn(cdev_data->dev, "Cannot add kprofiles GPU vote: %d\n", ret);
 }
+#endif
 
 static int devfreq_cdev_set_state(struct thermal_cooling_device *cdev,
 					unsigned long state)
@@ -118,28 +105,16 @@ static int devfreq_cdev_set_state(struct thermal_cooling_device *cdev,
 	struct devfreq_cdev_device *cdev_data = cdev->devdata;
 	int ret = 0;
 	unsigned long freq;
-	unsigned long req_state = state;
-
-#ifdef CONFIG_KPROFILES
-	/*
-	 * In performance kprofiles mode, prevent the thermal daemon from
-	 * throttling the GPU below the maximum OPP (state 0 = top freq).
-	 */
-	if (cdev_data->kp_perf_override && state > 0)
-		state = 0;
-#endif
 
 	if (state > cdev_data->max_state)
 		return -EINVAL;
-	state = devfreq_cdev_map_state(cdev_data, state);
 	if (state == cdev_data->cur_state)
 		return 0;
 	freq = cdev_data->freq_table[state];
-	pr_debug("cdev:%s req_state:%lu mapped_state:%lu limit:%lu\n",
-		 cdev->type, req_state, state, freq);
+	pr_debug("cdev:%s state:%lu limit:%lu\n", cdev->type, state, freq);
 	ret = dev_pm_qos_update_request(&cdev_data->qos_max_freq_req, freq);
 	if (ret < 0) {
-		pr_err("Error placing qos request:%u. cdev:%s err:%d\n",
+		pr_err("Error placing qos request:%lu. cdev:%s err:%d\n",
 				freq, cdev->type, ret);
 		return ret;
 	}
@@ -197,12 +172,15 @@ static void devfreq_cdev_work(struct work_struct *work)
 	cdev_data->dev = df->dev.parent;
 	cdev_data->devfreq = df;
 	freq_ct = dev_pm_opp_get_opp_count(cdev_data->dev);
+	if (freq_ct <= 0)
+		return;
 	freq_table = kcalloc(freq_ct, sizeof(*freq_table), GFP_KERNEL);
 	if (!freq_table) {
 		ret = -ENOMEM;
 		return;
 	}
 
+	cdev_data->freq_table = freq_table;
 	for (i = 0, freq = ULONG_MAX; i < freq_ct; i++, freq--) {
 
 		opp = dev_pm_opp_find_freq_floor(cdev_data->dev, &freq);
@@ -213,10 +191,9 @@ static void devfreq_cdev_work(struct work_struct *work)
 		dev_pm_opp_put(opp);
 
 		freq_table[i] = DIV_ROUND_UP(freq, 1000); //hz to khz
-		pr_debug("%d. freq table:%d\n", i, freq_table[i]);
+		pr_debug("%d. freq table:%lu\n", i, freq_table[i]);
 	}
-	cdev_data->max_state = freq_ct-1;
-	cdev_data->freq_table = freq_table;
+	cdev_data->max_state = freq_ct - 1;
 	ret = dev_pm_qos_add_request(cdev_data->dev,
 					&cdev_data->qos_max_freq_req,
 					DEV_PM_QOS_MAX_FREQUENCY,
@@ -226,25 +203,23 @@ static void devfreq_cdev_work(struct work_struct *work)
 	cdev_data->cdev = thermal_cooling_device_register(DEVFREQ_CDEV_NAME,
 						cdev_data, &devfreq_cdev_ops);
 	if (IS_ERR(cdev_data->cdev)) {
-		pr_err("Cdev register failed for gpu, ret:%d\n",
+		pr_err("Cdev register failed for gpu, ret:%ld\n",
 			PTR_ERR(cdev_data->cdev));
 		cdev_data->cdev = NULL;
 		goto qos_exit;
 	}
 
-#ifdef CONFIG_KPROFILES
-	cdev_data->kp_nb.notifier_call = devfreq_cdev_kp_notifier_cb;
-	kp_notifier_register_client(&cdev_data->kp_nb);
-	/* Apply initial kprofiles state */
-	devfreq_cdev_kp_notifier_cb(&cdev_data->kp_nb, KP_MODE_CHANGE,
-				    (void *)(uintptr_t)kp_active_mode());
+#if IS_REACHABLE(CONFIG_KPROFILES)
+	devfreq_cdev_kp_init(cdev_data);
 #endif
 
 	return;
 
 qos_exit:
 	kfree(cdev_data->freq_table);
-	dev_pm_qos_remove_request(&cdev_data->qos_max_freq_req);
+	cdev_data->freq_table = NULL;
+	if (dev_pm_qos_request_active(&cdev_data->qos_max_freq_req))
+		dev_pm_qos_remove_request(&cdev_data->qos_max_freq_req);
 }
 
 static int devfreq_cdev_probe(struct platform_device *pdev)
@@ -257,6 +232,8 @@ static int devfreq_cdev_probe(struct platform_device *pdev)
 
 	devfreq_cdev->np = of_parse_phandle(pdev->dev.of_node,
 				"qcom,devfreq", 0);
+	if (!devfreq_cdev->np)
+		return -EINVAL;
 	devfreq_cdev->retry_cnt = MAX_RETRY_CNT;
 
 	INIT_DEFERRABLE_WORK(&devfreq_cdev->register_work, devfreq_cdev_work);
@@ -267,15 +244,20 @@ static int devfreq_cdev_probe(struct platform_device *pdev)
 
 static int devfreq_cdev_remove(struct platform_device *pdev)
 {
+	cancel_delayed_work_sync(&devfreq_cdev->register_work);
 	if (devfreq_cdev->cdev) {
-#ifdef CONFIG_KPROFILES
-		kp_notifier_unregister_client(&devfreq_cdev->kp_nb);
+#if IS_REACHABLE(CONFIG_KPROFILES)
+		if (dev_pm_qos_request_active(&devfreq_cdev->kp_max_freq_req)) {
+			kp_notifier_unregister_client(&devfreq_cdev->kp_nb);
+			dev_pm_qos_remove_request(&devfreq_cdev->kp_max_freq_req);
+		}
 #endif
 		thermal_cooling_device_unregister(devfreq_cdev->cdev);
 		dev_pm_qos_remove_request(&devfreq_cdev->qos_max_freq_req);
 		kfree(devfreq_cdev->freq_table);
 		devfreq_cdev->cdev = NULL;
 	}
+	of_node_put(devfreq_cdev->np);
 
 	return 0;
 }

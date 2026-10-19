@@ -4,32 +4,24 @@
 
 config KPROFILES
 	tristate "Kprofiles Kernel Module"
+	depends on CPU_FREQ
 	default y
 	help
-	  This allows you to regulate in-kernel activities in a profile-oriented manner.
-	  It creates a sysfs node which can be used to change profiles via userspace.
-	  It provides 4 profile modes: Disabled, Battery, Balanced and Performance.
+	  Expose Disabled, Battery, Balanced and Performance profiles through
+	  sysfs. CPU limits use independent frequency QoS requests and follow
+	  cpufreq policy creation and removal. The QTI devfreq cooling driver
+	  can apply a separate GPU battery ceiling.
 
-	  The former can be used to disable/enable or tune kernel activities according
-	  to a profile mode. Check the README.md for more information.
-
-	  It's safe to say Y here, as the driver isn't very demanding and is only
-	  used when developer uses the exported API functions in an another driver.
+	  Thermal and userspace constraints remain independent. See
+	  drivers/kprofiles/README.md for the ABI and profile policy.
 
 if KPROFILES
 
 config KP_DEFAULT_MODE
 	int "Default mode number for kp_mode"
 	range 0 3
-	default 0
+	default 2
 	help
 	  Kprofiles will activate this mode during boot-up.
 
-config KP_VERBOSE_DEBUG
-	bool "Verbose Kprofiles debugging"
-	default n
-	help
-	  Say Y here if you are testing Kprofiles or trying to
-	  debug and indentify problems.
-
-endif # if KPROFILES
+endif # KPROFILES

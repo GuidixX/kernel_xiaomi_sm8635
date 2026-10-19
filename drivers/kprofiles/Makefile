@@ -4,4 +4,4 @@
 
 obj-$(CONFIG_KPROFILES)	+=	kprofiles.o
 
-kprofiles-objs	:=	main.o
+kprofiles-objs	:=	main.o cpu.o

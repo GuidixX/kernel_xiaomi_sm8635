@@ -127,27 +127,6 @@ struct msm_gpu_devfreq {
 	 */
 	struct dev_pm_qos_request boost_freq;
 
-	/**
-	 * max_freq:
-	 *
-	 * A PM QoS constraint to cap max GPU frequency. Used by
-	 * kprofiles to limit GPU frequency in battery mode.
-	 */
-	struct dev_pm_qos_request max_freq;
-
-#ifdef CONFIG_KPROFILES
-	/**
-	 * kp_perf_freq:
-	 *
-	 * A PM QoS MIN_FREQUENCY constraint that locks the GPU to its
-	 * maximum OPP in kprofiles performance mode, overriding any
-	 * MAX_FREQUENCY cap imposed by thermal cooling devices.
-	 */
-	struct dev_pm_qos_request kp_perf_freq;
-
-	/** kp_nb: kprofiles notifier for profile-based GPU freq limiting */
-	struct notifier_block kp_nb;
-#endif
 
 	/**
 	 * busy_cycles: Last busy counter value, for calculating elapsed busy
@@ -716,6 +695,5 @@ static inline void msm_gpu_crashstate_put(struct msm_gpu *gpu)
  */
 #define check_apriv(gpu, flags) \
 	(((gpu)->hw_apriv ? MSM_BO_MAP_PRIV : 0) | (flags))
-
 
 #endif /* __MSM_GPU_H__ */

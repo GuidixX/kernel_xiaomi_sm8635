@@ -1,290 +1,326 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  * KernelSpace Profiles
- *
- * This Linux kernel module provides a framework for managing and switching between system profiles or modes
- * at the kernel level. Each profile represents a specific configuration of kernel features and settings
- * optimized for different use cases such as battery life, balanced performance, or maximum performance.
- *
- * The module supports various subsystems, including MSM DRM, MI DRM, and framebuffer (FB). It integrates
- * with these subsystems to receive notifications about screen state changes and adjust the active profile
- * accordingly.
- *
- * The module offers functions for setting the profile mode, overriding the mode temporarily, and retrieving
- * the active profile mode. Profiles can be dynamically switched based on system events, user requests, or
- * time-based rules.
- *
- * For more information and usage examples, refer to the README file at:
- * https://github.com/beakthoven/Kprofiles/blob/main/README.md
- *
  * Copyright (C) 2021-2025 Dakkshesh <dakkshesh5@gmail.com>
- * Version: 6.0.0
- * License: GPL-2.0
+ * Copyright (C) 2026 GuidixX <guidixm@gmail.com>
+ *
+ * Selected mode, temporary override and display/suspend state are independent.
+ * QoS updates and blocking notifications run in workqueue context.
  */
+#define pr_fmt(fmt) "kprofiles: " fmt
 
-#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
-
-#include <linux/delay.h>
+#include <linux/jiffies.h>
+#include <linux/kobject.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
-#include <linux/notifier.h>
-#include <linux/kobject.h>
-#include <linux/sysfs.h>
 #include <linux/mutex.h>
-#include <linux/compiler.h>
+#include <linux/suspend.h>
+#include <linux/sysfs.h>
+#include <linux/workqueue.h>
+
+#include "policy.h"
 #include "version.h"
 
 static BLOCKING_NOTIFIER_HEAD(kp_mode_notifier);
 unsigned int KP_MODE_CHANGE = 0x80000000;
 EXPORT_SYMBOL_GPL(KP_MODE_CHANGE);
 
-static unsigned int kp_override_mode;
-static bool kp_override;
-
-static bool auto_kp __read_mostly = 0;
-module_param(auto_kp, bool, 0664);
-MODULE_PARM_DESC(auto_kp, "Enable/disable automatic kernel profile management");
-
+static DEFINE_MUTEX(kp_lock);
 static unsigned int kp_mode = CONFIG_KP_DEFAULT_MODE;
-
+static unsigned int kp_effective_mode = CONFIG_KP_DEFAULT_MODE;
+static unsigned int kp_override_mode;
+static unsigned long kp_override_until;
+static bool kp_override;
+static bool auto_kp;
+static bool screen_on = true;
+static bool suspended;
+static bool kp_ready;
 static struct kobject *kp_kobj;
 
-DEFINE_MUTEX(kp_set_mode_rb_lock);
+static void kp_apply_workfn(struct work_struct *work);
+static void kp_expire_workfn(struct work_struct *work);
+static DECLARE_WORK(kp_apply_work, kp_apply_workfn);
+static DECLARE_DELAYED_WORK(kp_expire_work, kp_expire_workfn);
 
-#ifdef CONFIG_KP_VERBOSE_DEBUG
-#define kp_dbg(fmt, ...)	pr_info(fmt, ##__VA_ARGS__)
-#else
-#define kp_dbg(fmt, ...)
-#endif
-
-#define kp_err(fmt, ...)	pr_err(fmt, ##__VA_ARGS__)
-#define kp_info(fmt, ...)	pr_info(fmt, ##__VA_ARGS__)
-
-static void kp_trigger_mode_change_event(void);
-
-static __always_inline int __kp_set_mode(unsigned int level)
+/* Caller holds kp_lock. The hot-path getter never sleeps or notifies. */
+static void kp_refresh_locked(void)
 {
-	if (unlikely(level > 3))
-		return -EINVAL;
+	unsigned int mode = kp_resolve_mode(kp_mode, auto_kp,
+			screen_on && !suspended, kp_override, kp_override_mode);
 
-	WRITE_ONCE(kp_mode, level);
-	return 0;
+	WRITE_ONCE(kp_effective_mode, mode);
+	if (kp_ready)
+		schedule_work(&kp_apply_work);
 }
 
-/**
- * kp_set_mode_rollback - Change profile to a given mode for a specific duration
- * @level: The profile mode level to set (0-3)
- * @duration_ms: The duration to keep the profile mode in milliseconds
- *
- * This function changes the profile to the specified mode for a specific
- * duration during any in-kernel event, and then returns to the previously
- * active mode.
- *
- * Usage example: kp_set_mode_rollback(3, 55);
+static void kp_apply_workfn(struct work_struct *work)
+{
+	static unsigned int notified_mode = UINT_MAX;
+	unsigned int mode;
+	bool interactive;
+
+	mutex_lock(&kp_lock);
+	mode = kp_effective_mode;
+	interactive = screen_on && !suspended;
+	mutex_unlock(&kp_lock);
+
+	kp_cpu_update(mode, interactive);
+	if (mode == notified_mode)
+		return;
+	notified_mode = mode;
+	/* Callbacks may read or change the profile; do not hold kp_lock. */
+	blocking_notifier_call_chain(&kp_mode_notifier, KP_MODE_CHANGE,
+				     (void *)(uintptr_t)mode);
+}
+
+static void kp_expire_workfn(struct work_struct *work)
+{
+	unsigned long now;
+
+	mutex_lock(&kp_lock);
+	now = jiffies;
+	if (kp_override) {
+		if (time_before(now, kp_override_until)) {
+			mod_delayed_work(system_wq, &kp_expire_work,
+					 kp_override_until - now);
+		} else {
+			kp_override = false;
+			kp_refresh_locked();
+		}
+	}
+	mutex_unlock(&kp_lock);
+}
+
+/*
+ * Latest temporary request wins. It expires against the current selected
+ * profile, never a saved profile that could overwrite a newer user choice.
+ * A zero duration cancels an override. Unlike v6 this never sleeps for duration.
  */
 void kp_set_mode_rollback(unsigned int level, unsigned int duration_ms)
 {
-	if (unlikely(level > 3)) {
-		kp_err("Invalid mode requested, skipping mode change.\n");
+	if (level > KP_MODE_PERFORMANCE)
 		return;
+	mutex_lock(&kp_lock);
+	kp_override = duration_ms != 0;
+	kp_override_mode = level;
+	if (kp_override) {
+		kp_override_until = jiffies + msecs_to_jiffies(duration_ms);
+		mod_delayed_work(system_wq, &kp_expire_work,
+				 msecs_to_jiffies(duration_ms));
+	} else {
+		cancel_delayed_work(&kp_expire_work);
 	}
-
-	mutex_lock(&kp_set_mode_rb_lock);
-
-	WRITE_ONCE(kp_override_mode, level);
-	WRITE_ONCE(kp_override, true);
-	kp_trigger_mode_change_event();
-
-	msleep(duration_ms);
-
-	WRITE_ONCE(kp_override, false);
-	kp_trigger_mode_change_event();
-
-	mutex_unlock(&kp_set_mode_rb_lock);
+	kp_refresh_locked();
+	mutex_unlock(&kp_lock);
 }
 EXPORT_SYMBOL_GPL(kp_set_mode_rollback);
 
-/**
- * kp_set_mode - Change profile to a given mode
- * @level: The profile mode level to set (0-3)
- *
- * This function changes the profile to the specified mode during any
- * in-kernel event.
- *
- * Usage example: kp_set_mode(3);
- */
 void kp_set_mode(unsigned int level)
 {
-	int ret = 0;
-
-	mutex_lock(&kp_set_mode_rb_lock);
-
-	ret = __kp_set_mode(level);
-	if (ret) {
-		kp_err("Invalid mode requested, skipping mode change.\n");
-		mutex_unlock(&kp_set_mode_rb_lock);
+	if (level > KP_MODE_PERFORMANCE)
 		return;
-	}
-
-	kp_trigger_mode_change_event();
-
-	mutex_unlock(&kp_set_mode_rb_lock);
+	mutex_lock(&kp_lock);
+	WRITE_ONCE(kp_mode, level);
+	kp_override = false;
+	cancel_delayed_work(&kp_expire_work);
+	kp_refresh_locked();
+	mutex_unlock(&kp_lock);
 }
 EXPORT_SYMBOL_GPL(kp_set_mode);
 
-/**
- * kp_active_mode - Get the currently active profile mode
- *
- * This function returns a number from 0 to 3 depending on the active profile mode.
- * The returned value can be used in conditions to disable/enable or tune kernel
- * features according to the profile mode.
- *
- * Return:
- * The currently active profile mode (0-3)
- *
- * Usage example:
- *
- * switch (kp_active_mode()) {
- * case 1:
- *     // Things to be done when battery profile is active
- *     break;
- * case 2:
- *     // Things to be done when balanced profile is active
- *     break;
- * case 3:
- *     // Things to be done when performance profile is active
- *     break;
- * default:
- *     // Things to be done when kprofiles is disabled
- *     break;
- * }
- */
 int kp_active_mode(void)
 {
-	if (READ_ONCE(kp_override))
-		return READ_ONCE(kp_override_mode);
-
-	if (unlikely(READ_ONCE(kp_mode) > 3)) {
-		WRITE_ONCE(kp_mode, 0);
-		kp_trigger_mode_change_event();
-		kp_err("Invalid value passed, falling back to level 0\n");
-	}
-
-	return READ_ONCE(kp_mode);
+	return READ_ONCE(kp_effective_mode);
 }
 EXPORT_SYMBOL_GPL(kp_active_mode);
 
-/**
- * kp_trigger_mode_change_event - Trigger a mode change event
- *
- * This function triggers a mode change event by calling the blocking notifier
- * chain for kp_mode_notifier. It informs all registered listeners about the
- * change in the profile mode.
- */
-static __always_inline void kp_trigger_mode_change_event(void)
-{
-	unsigned int current_mode = kp_active_mode();
-
-	blocking_notifier_call_chain(&kp_mode_notifier, KP_MODE_CHANGE,
-				     (void *)(uintptr_t)current_mode);
-}
-
-/**
- * kp_notifier_register_client - Register a notifier client for profile mode changes
- * @nb: The notifier block to register
- *
- * This function registers a notifier client to receive notifications about profile mode changes.
- *
- * Return:
- * 0 on success, or an error code on failure.
- */
 int kp_notifier_register_client(struct notifier_block *nb)
 {
 	return blocking_notifier_chain_register(&kp_mode_notifier, nb);
 }
 EXPORT_SYMBOL_GPL(kp_notifier_register_client);
 
-/**
- * kp_notifier_unregister_client - Unregister a notifier client for profile mode changes
- * @nb: The notifier block to unregister
- *
- * This function unregisters a previously registered notifier client for profile mode changes.
- *
- * Return:
- * 0 on success, or an error code on failure.
- */
 int kp_notifier_unregister_client(struct notifier_block *nb)
 {
 	return blocking_notifier_chain_unregister(&kp_mode_notifier, nb);
 }
 EXPORT_SYMBOL_GPL(kp_notifier_unregister_client);
 
-static inline ssize_t kp_mode_show(struct kobject *kobj,
-				   struct kobj_attribute *attr, char *buf)
+static int kp_auto_set(const char *val, const struct kernel_param *param)
+{
+	bool enable, ready;
+	int ret = kstrtobool(val, &enable);
+
+	if (ret)
+		return ret;
+	mutex_lock(&kp_lock);
+	auto_kp = enable;
+	ready = kp_ready;
+	kp_refresh_locked();
+	mutex_unlock(&kp_lock);
+	if (ready)
+		flush_work(&kp_apply_work);
+	return 0;
+}
+
+static int kp_auto_get(char *buf, const struct kernel_param *param)
+{
+	int ret;
+
+	mutex_lock(&kp_lock);
+	ret = param_get_bool(buf, param);
+	mutex_unlock(&kp_lock);
+	return ret;
+}
+
+static const struct kernel_param_ops kp_auto_ops = {
+	.set = kp_auto_set,
+	.get = kp_auto_get,
+};
+module_param_cb(auto_kp, &kp_auto_ops, &auto_kp, 0664);
+MODULE_PARM_DESC(auto_kp, "Use Battery while display is inactive or suspended");
+
+static ssize_t kp_mode_show(struct kobject *kobj, struct kobj_attribute *attr,
+			    char *buf)
 {
 	return sysfs_emit(buf, "%u\n", READ_ONCE(kp_mode));
 }
 
-static inline ssize_t kp_mode_store(struct kobject *kobj,
-				    struct kobj_attribute *attr,
-				    const char *buf, size_t count)
+static ssize_t kp_mode_store(struct kobject *kobj, struct kobj_attribute *attr,
+			     const char *buf, size_t count)
 {
-	unsigned int new_mode;
-	int ret;
+	unsigned int mode;
+	int ret = kstrtouint(buf, 10, &mode);
 
-	ret = kstrtouint(buf, 10, &new_mode);
 	if (ret)
 		return ret;
+	if (mode > KP_MODE_PERFORMANCE)
+		return -EINVAL;
+	kp_set_mode(mode);
+	flush_work(&kp_apply_work);
+	return count;
+}
 
-	mutex_lock(&kp_set_mode_rb_lock);
+static ssize_t active_mode_show(struct kobject *kobj, struct kobj_attribute *attr,
+				char *buf)
+{
+	return sysfs_emit(buf, "%d\n", kp_active_mode());
+}
 
-	ret = __kp_set_mode(new_mode);
-	if (ret) {
-		kp_err("User changed mode is invalid, skipping mode change.\n");
-		mutex_unlock(&kp_set_mode_rb_lock);
+static ssize_t screen_on_show(struct kobject *kobj, struct kobj_attribute *attr,
+			      char *buf)
+{
+	return sysfs_emit(buf, "%u\n", READ_ONCE(screen_on));
+}
+
+static ssize_t screen_on_store(struct kobject *kobj, struct kobj_attribute *attr,
+			       const char *buf, size_t count)
+{
+	bool on;
+	int ret = kstrtobool(buf, &on);
+
+	if (ret)
 		return ret;
+	mutex_lock(&kp_lock);
+	WRITE_ONCE(screen_on, on);
+	/* A transient boost must not reappear after a screen-off interval. */
+	if (!on) {
+		kp_override = false;
+		cancel_delayed_work(&kp_expire_work);
 	}
-
-	kp_trigger_mode_change_event();
-
-	mutex_unlock(&kp_set_mode_rb_lock);
-
+	kp_refresh_locked();
+	mutex_unlock(&kp_lock);
+	flush_work(&kp_apply_work);
 	return count;
 }
 
 static struct kobj_attribute kp_mode_attribute =
 	__ATTR(kp_mode, 0664, kp_mode_show, kp_mode_store);
+static struct kobj_attribute active_mode_attribute = __ATTR_RO(active_mode);
+static struct kobj_attribute screen_on_attribute =
+	__ATTR(screen_on, 0664, screen_on_show, screen_on_store);
 
 static struct attribute *kp_attrs[] = {
 	&kp_mode_attribute.attr,
+	&active_mode_attribute.attr,
+	&screen_on_attribute.attr,
 	NULL,
 };
-
-static struct attribute_group kp_attr_group = {
+static const struct attribute_group kp_attr_group = {
 	.attrs = kp_attrs,
+};
+
+static int kp_pm_event(struct notifier_block *nb, unsigned long event, void *data)
+{
+	bool sleep;
+
+	switch (event) {
+	case PM_SUSPEND_PREPARE:
+	case PM_HIBERNATION_PREPARE:
+		sleep = true;
+		break;
+	case PM_POST_SUSPEND:
+	case PM_POST_HIBERNATION:
+	case PM_POST_RESTORE:
+		sleep = false;
+		break;
+	default:
+		return NOTIFY_DONE;
+	}
+	mutex_lock(&kp_lock);
+	suspended = sleep;
+	if (sleep) {
+		kp_override = false;
+		cancel_delayed_work(&kp_expire_work);
+	}
+	kp_refresh_locked();
+	mutex_unlock(&kp_lock);
+	flush_work(&kp_apply_work);
+	return NOTIFY_OK;
+}
+
+static struct notifier_block kp_pm_nb = {
+	.notifier_call = kp_pm_event,
 };
 
 static int __init kp_init(void)
 {
-	int ret = 0;
+	int ret;
 
+	ret = kp_cpu_init();
+	if (ret)
+		return ret;
+	ret = register_pm_notifier(&kp_pm_nb);
+	if (ret)
+		goto cpu_exit;
 	kp_kobj = kobject_create_and_add("kprofiles", kernel_kobj);
 	if (!kp_kobj) {
-		kp_err("Failed to create Kprofiles kobject\n");
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto pm_exit;
 	}
-
+	mutex_lock(&kp_lock);
+	kp_ready = true;
+	kp_refresh_locked();
+	mutex_unlock(&kp_lock);
 	ret = sysfs_create_group(kp_kobj, &kp_attr_group);
-	if (ret) {
-		kp_err("Failed to create sysfs attributes for Kprofiles\n");
-		kobject_put(kp_kobj);
-		return ret;
-	}
+	if (ret)
+		goto work_exit;
+	/* Complete the initial votes before reporting the driver ready. */
+	flush_work(&kp_apply_work);
+	pr_info("Kprofiles " KPROFILES_VERSION " initialized\n");
+	return 0;
 
-	kp_info("Kprofiles " KPROFILES_VERSION
-		" loaded successfully. For further details, visit https://github.com/beakthoven/Kprofiles/blob/main/README.md\n");
-	kp_info("Copyright (C) 2021-2025 Dakkshesh <dakkshesh5@gmail.com>.\n");
-
+work_exit:
+	mutex_lock(&kp_lock);
+	kp_ready = false;
+	mutex_unlock(&kp_lock);
+	cancel_delayed_work_sync(&kp_expire_work);
+	cancel_work_sync(&kp_apply_work);
+	kobject_put(kp_kobj);
+pm_exit:
+	unregister_pm_notifier(&kp_pm_nb);
+cpu_exit:
+	kp_cpu_exit();
 	return ret;
 }
 module_init(kp_init);
@@ -292,11 +328,19 @@ module_init(kp_init);
 static void __exit kp_exit(void)
 {
 	sysfs_remove_group(kp_kobj, &kp_attr_group);
+	unregister_pm_notifier(&kp_pm_nb);
+	mutex_lock(&kp_lock);
+	kp_ready = false;
+	kp_override = false;
+	mutex_unlock(&kp_lock);
+	cancel_delayed_work_sync(&kp_expire_work);
+	cancel_work_sync(&kp_apply_work);
+	kp_cpu_exit();
 	kobject_put(kp_kobj);
 }
 module_exit(kp_exit);
 
 MODULE_LICENSE("GPL v2");
-MODULE_DESCRIPTION("KernelSpace Profiles");
+MODULE_DESCRIPTION("KernelSpace Profiles with independent frequency QoS");
 MODULE_AUTHOR("Dakkshesh <dakkshesh5@gmail.com>");
 MODULE_VERSION(KPROFILES_VERSION);

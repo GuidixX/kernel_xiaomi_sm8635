@@ -1,262 +1,60 @@
-# Kprofiles
+# Kprofiles for peridot
 
-## Table of Contents
+Kprofiles starts in Balanced mode and applies its initial CPU policy during
+driver initialization. The peridot defconfig already enables the driver and
+the QTI devfreq integration. No additional config fragment, profile file,
+boot script or manual sysfs initialization is required.
 
-1. [About](#about)
-2. [Supported Kernel Version](#supported-kernel-versions)
-3. [Usage](#using-kprofiles-in-your-linux-kernel-source)
-4. [Available APIs](#available-apis)
-5. [How To Contribute](#how-to-contribute)
-6. [License](#license)
-7. [Our Team](#team)
+XiaomiParts continues to select the global and per-app profiles through the
+existing kp_mode interface. Its saved choices are restored by the app.
 
-## About
+| Mode | CPU policy | GPU policy |
+| --- | --- | --- |
+| 0 Disabled | No kprofiles votes | No kprofiles votes |
+| 1 Battery | Ceiling at 80% of each policy's hardware maximum | Highest OPP at or below 80% of maximum |
+| 2 Balanced | No additional ceiling or floor | Demand driven |
+| 3 Performance | Floor at 40% of maximum while interactive | Demand driven |
 
-Kprofiles is a simple Linux kernel module that can be used to regulate in-kernel activities such as boosts that are normally not exposed to the userspace. Kprofiles operates in a profile-oriented manner So, It has four profile modes: `Disabled`, `Battery`, `Balanced`, and `Performance`. Each mode is allocated a mode number. Developers can use the Kprofiles API function in conditions to limit or enable in-kernel tasks in a certain profile mode **_(look at [usage section](#using-kprofiles-in-your-linux-kernel-source) for example)_**. Userspace can interact with Kprofiles by adjusting the mode number in `/sys/kernel/kprofiles/kp_mode`. The table below shows which mode number corresponds to the profile mode.
+CPU limits are resolved to supported frequencies by cpufreq. The driver owns
+a separate pair of QoS requests for each CPU policy, including policies created
+after initialization. Switching profiles changes only those requests.
+Userspace, input boost and thermal constraints retain their own lifetimes.
 
-| Profile Mode       | Mode Number |
-| ------------------ | ----------- |
-| Disabled (default) | 0           |
-| Battery            | 1           |
-| Balanced           | 2           |
-| Performance        | 3           |
+The QTI devfreq driver supplies a separate GPU Battery vote for peridot's
+KGSL GPU. Cooling state N maps directly to frequency table entry N in every
+profile. Performance never suppresses thermal constraints or forces the GPU
+to its maximum frequency.
 
-Furthermore, Kprofiles provides automatic profile changer (auto Kprofiles), which uses `FB notifier`, `MSM DRM notifier` or `MI DRM notifier` to enforce battery profile mode when the device's screen goes off and switches back to previously active mode when the device wakes up. Users can disable or enable this feature at runtime without recompiling the kernel by changing the bool value in `/sys/module/kprofiles/parameters/auto_kp`
+## Userspace ABI
 
-Kprofiles additionally has API functions for switching profiles in response to any in-kernel event. For further information, please see the table of [Available APIs](#available-apis)
+- /sys/kernel/kprofiles/kp_mode: selected mode, 0 through 3.
+- /sys/module/kprofiles/parameters/auto_kp: automatic Battery mode while the
+  display is inactive or the system is suspended; controlled by XiaomiParts.
+- /sys/kernel/kprofiles/active_mode: effective mode, read only.
+- /sys/kernel/kprofiles/screen_on: display state, supplied by the existing
+  Power HAL DISPLAY_INACTIVE hint and its device init/SELinux integration.
 
-## Supported Kernel Versions
+The display starts active. The suspend notifier also releases CPU floors.
+With auto_kp enabled, display inactivity or suspend temporarily selects
+Battery; waking restores the selected profile. Display inactivity and suspend
+release the Performance CPU floor even when automatic mode selection is off.
+Writing kp_mode or auto_kp waits for the corresponding workqueue update.
 
-Kprofiles is tested on Linux 3.10+ kernels
+## Kernel API
 
-## Using kprofiles in your Linux kernel source
+Include linux/kprofiles.h. kp_active_mode() is a side-effect-free READ_ONCE
+getter safe for scheduler paths. Setters require sleepable context.
 
-If you're using `git`, using `git subtree` or `git submodule` is highly recommended.
+kp_set_mode(level) changes the selected mode and cancels a temporary override.
+kp_set_mode_rollback(level, duration_ms) applies a temporary override without
+sleeping for its duration. The latest request replaces the previous one;
+zero duration cancels it. Expiration resolves against the selected profile.
+Screen-off and suspend cancel temporary overrides. Disabled takes precedence
+over both automatic mode selection and temporary overrides.
 
-1. Add this repository to `drivers/misc/kprofiles`
-
-2. Modify `drivers/misc/Kconfig`
-
-```diff
-menu "Misc devices"
-
-source "drivers/misc/genwqe/Kconfig"
-+source "drivers/misc/kprofiles/Kconfig"
-source "drivers/misc/echo/Kconfig"
-endmenu
-```
-
-3. Modify `drivers/misc/Makefile`
-
-```diff
-obj-$(CONFIG_GENWQE)     += genwqe/
-+obj-$(CONFIG_KPROFILES) += kprofiles/
-obj-$(CONFIG_ECHO)       += echo/
-```
-
-4. Define the api function you need in the required file using extern, Kprofiles can be used in various places like for example boosting drivers, below is an example of using kprofiles in kernel/fork.c to control cpu and ddr boosts during zygote forking using kp_active_mode() API.
-
-```diff
-+ #ifdef CONFIG_KPROFILES
-+ extern int kp_active_mode(void);
-+ #endif
-/*
- *  Ok, this is the main fork-routine.
- *
- * It copies the process, and if successful kick-starts
- * it and waits for it to finish using the VM if required.
- */
-long _do_fork(unsigned long clone_flags,
-          unsigned long stack_start,
-          unsigned long stack_size,
-          int __user *parent_tidptr,
-          int __user *child_tidptr,
-          unsigned long tls)
-{
-    struct task_struct *p;
-    int trace = 0;
-    long nr;
-
-    /* Boost CPU to the max for 50 ms when userspace launches an app */
-    if (task_is_zygote(current)) {
--       cpu_input_boost_kick_max(50);
--       devfreq_boost_kick_max(DEVFREQ_MSM_LLCCBW, 50);
--       devfreq_boost_kick_max(DEVFREQ_MSM_CPUBW, 50);
-+ #ifdef CONFIG_KPROFILES
-+   /*
-+    * Boost CPU and DDR for 60ms if performance mode is active.
-+    * Boost CPU and DDR for 50ms if default mode is active to retain default behaviour.
-+    * Boost CPU & DDR for 25ms if balanced profile is enabled
-+    * Dont boost CPU & DDR if battery saver profile is enabled
-+    */
-+       switch (kp_active_mode()) {
-+       case 0:
-+           cpu_input_boost_kick_max(60);
-+           devfreq_boost_kick_max(DEVFREQ_MSM_LLCCBW, 50);
-+           devfreq_boost_kick_max(DEVFREQ_MSM_CPUBW, 50);
-+           break;
-+       case 2:
-+           cpu_input_boost_kick_max(60);
-+           devfreq_boost_kick_max(DEVFREQ_MSM_LLCCBW, 25);
-+           devfreq_boost_kick_max(DEVFREQ_MSM_CPUBW, 25);
-+           break;
-+       case 3:
-+           cpu_input_boost_kick_max(60);
-+           devfreq_boost_kick_max(DEVFREQ_MSM_LLCCBW, 60);
-+           devfreq_boost_kick_max(DEVFREQ_MSM_CPUBW, 60);
-+           break;
-+       default:
-+           pr_info("Battery Profile Active, Skipping Boost...\n");
-+           break;
-+       }
-+ #else
-+       cpu_input_boost_kick_max(60);
-+       devfreq_boost_kick_max(DEVFREQ_MSM_LLCCBW, 50);
-+       devfreq_boost_kick_max(DEVFREQ_MSM_CPUBW, 50);
-+ #endif
-```
-
-and you are good to go!
-
-## Available APIs
-
-### kp_active_mode()
-- **Info**: This function returns a number from 0 and 3 depending on the profile selected. It can be used in conditions to regulate boosts and other things.
-- **Arguments**: None
-- **Example**:
-```c
-#include <linux/kernel.h>
-#include <linux/cpufreq.h>
-#ifdef CONFIG_KPROFILES
-extern int kp_active_mode(void);
-void example_function(void)
-{
-    // Based on the active profile mode, tune kernel features or settings
-    switch (kp_active_mode()) {
-        case 1:
-            // Things to be done when battery profile is active
-            break;
-        case 2:
-            // Things to be done when balance profile is active
-            break;
-        case 3:
-            // Things to be done when performance profile is active
-            break;
-        default:
-            // Things to be done when kprofiles is disabled or default profile is active
-            break;
-    }
-}
-#endif
-```
-
-### kp_set_mode()
-- **Info**: This function can be used to change profile to any given mode during any in-kernel event.
-- **Arguments**:
-  - `level` :
-    <br>type: unsigned int
-    <br>definition: The mode number to switch to. 
-- **Example**:
-```c
-void example_function(void)
-{
-    if (required_kernel_event()) {
-        // Switch to battery profile (mode 0)
-        kp_set_mode(1);
-        printk(KERN_INFO "Switched to battery profile (mode 1)\n");
-    } else {
-        // Switch to balanced profile (mode 1)
-        kp_set_mode(2);
-        printk(KERN_INFO "Switched to balanced profile (mode 2)\n");
-    }
-}
-```
-
-### kp_set_mode_rollback()  
-- **Info**: This function can be used to change profile to any given mode for a specific period of time during any in-kernel event, then return to the previously active mode.
-- **Arguments**:
-  - `level` :
-    <br>*type*: unsigned int
-    <br>*definition*: The mode number to switch to.
-  - `duration_ms` :
-    <br>*type*: unsigned int
-    <br>*definition*: The amount of time (in milliseconds) the specified mode should be active before switching back to the previously used mode.
-- **Example**:
-```c
-void example_function(void)
-{
-    if (required_kernel_event()) {
-        // Switch to performance profile (mode 3) for 50ms
-        kp_set_mode_rollback(3, 50);
-        printk(KERN_INFO "Switched to Performance profile for 50ms\n");
-    }
-}
-```
-
-### Profile mode event notifier  
-- **Info**: This basic event notifier enables the execution of a sequence of code as soon as a profile mode is changed through user or in-kernel APIs. This can be advantageous for performing a series of tasks in a synchronized manner following a mode change.
-- **Example**:
-```c
-extern unsigned int KP_MODE_CHANGE;
-extern int kp_notifier_register_client(struct notifier_block *nb);
-extern int kp_notifier_unregister_client(struct notifier_block *nb);
-
-static int kp_mode_notifier_callback(struct notifier_block *nb, unsigned long event, void *data)
-{
-    unsigned int profile_mode = (unsigned int)data;
-
-    if (event == KP_MODE_CHANGE) {
-        switch (profile_mode) {
-            case 1:
-                // Things to be done when battery profile is active
-                break;
-            case 2:
-                // Things to be done when balanced profile is active
-                break;
-            case 3:
-                // Things to be done when performance profile is active
-                break;
-            default:
-                // Things to be done when kprofiles is disabled or default profile is active
-                break;
-        }
-    }
-
-    return NOTIFY_OK;
-}
-
-static struct notifier_block kp_mode_notifier = {
-    .notifier_call = kp_mode_notifier_callback,
-};
-
-static int __init example_driver_init(void)
-{
-    // Register the driver module as a client of the Kprofiles event notifier
-    kp_notifier_register_client(&kp_mode_notifier);
-
-    return 0;
-}
-
-static void __exit example_driver_exit(void)
-{
-    // Unregister the driver module as a client of the Kprofiles event notifier
-    kp_notifier_unregister_client(&kp_mode_notifier);
-}
-
-module_init(example_driver_init);
-module_exit(example_driver_exit);
-```
-
-## How To Contribute
-
-You can contribute to Kprofiles by sending us pull requests with the changes,
-Please provide a precise message with the commit explaining why you're making the change.
-
-## License
-
-This project is licensed under GPL-2.0.
-
-## Team
-
-- [Dakkshesh](https://github.com/beakthoven) : kernel module Author/Maintainer
-- [Cyberknight777](https://github.com/cyberknight777) : Kprofiles Manager Maintainer
+Blocking notifications use KP_MODE_CHANGE and carry the integer mode in data.
+They run on a workqueue without the state mutex. Callbacks may read or change
+mode, but must not unregister themselves from the same blocking chain.
+Registration does not replay a notification: initialize clients from
+kp_active_mode(), serializing that read with callbacks when needed.
+Repeated effective modes do not generate duplicate notifications.
