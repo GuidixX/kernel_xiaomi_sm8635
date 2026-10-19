@@ -8,11 +8,11 @@ static int battery_psy_set_charge_current(struct battery_chg_dev *bcdev, int val
 
 static int battery_chg_calc_fastcharge_mode(u32 sport_mode, u32 smart_chg)
 {
-	if (sport_mode == 1 && smart_chg == 8)
+	if (smart_chg != 0x9 && smart_chg != 9)
+		return 0;
+	if (sport_mode == 1)
 		return 2;
-	if (sport_mode == 0 && smart_chg == 8)
-		return 1;
-	return 0;
+	return 1;
 }
 
 static int battery_chg_get_fastcharge_mode(struct battery_chg_dev *bcdev, int *mode)
