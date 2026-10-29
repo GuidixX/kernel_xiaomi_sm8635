@@ -1,7 +1,7 @@
 /*
    LZ4 HC - High Compression Mode of LZ4
    Header File
-   Copyright (C) 2011-2020, Yann Collet.
+   Copyright (c) Yann Collet. All rights reserved.
    BSD 2-Clause License (http://www.opensource.org/licenses/bsd-license.php)
 
    Redistribution and use in source and binary forms, with or without
@@ -34,14 +34,13 @@
 #ifndef LZ4_HC_H_19834876238432
 #define LZ4_HC_H_19834876238432
 
-#if defined (__cplusplus)
-extern "C" {
-#endif
-
 /* --- Dependency --- */
 /* note : lz4hc requires lz4.h/lz4.c for compilation */
 #include "lz4.h"   /* stddef, LZ4LIB_API, LZ4_DEPRECATED */
 
+#if defined (__cplusplus)
+extern "C" {
+#endif
 
 /* --- Useful constants --- */
 #define LZ4HC_CLEVEL_MIN         2
@@ -59,6 +58,10 @@ extern "C" {
  *  Compression is guaranteed to succeed if `dstCapacity >= LZ4_compressBound(srcSize)` (see "lz4.h")
  *  Max supported `srcSize` value is LZ4_MAX_INPUT_SIZE (see "lz4.h")
  * `compressionLevel` : any value between 1 and LZ4HC_CLEVEL_MAX will work.
+ *                      Levels 1 and 2 are identical : the fastest HC mode (since v1.10.0).
+ *                      Levels 3 to 9 trade speed for ratio (LZ4HC_CLEVEL_DEFAULT is 9).
+ *                      Levels from LZ4HC_CLEVEL_OPT_MIN (10) use the optimal parser, the slowest.
+ *                      Values < 1 select LZ4HC_CLEVEL_DEFAULT.
  *                      Values > LZ4HC_CLEVEL_MAX behave the same as LZ4HC_CLEVEL_MAX.
  * @return : the number of bytes written into 'dst'
  *           or 0 if compression fails.
@@ -175,6 +178,13 @@ LZ4LIB_API int LZ4_compress_HC_continue_destSize(LZ4_streamHC_t* LZ4_streamHCPtr
                                            const char* src, char* dst,
                                                  int* srcSizePtr, int targetDstSize);
 
+/*! LZ4_saveDictHC():
+ * save history content (up to 64 KB) into a user-provided buffer @param safeBuffer.
+ * @return value is the size of dictionary effectively saved (<= MIN(maxDictSize, 64 KB)).
+ * This function is always successful, and expects its arguments to be valid.
+ * To this end, let's remind that (NULL,0) is valid,
+ * but (NULL,!0) is not, and will result in a segfault (or assert() depending on compilation mode).
+ */
 LZ4LIB_API int LZ4_saveDictHC (LZ4_streamHC_t* streamHCPtr, char* safeBuffer, int maxDictSize);
 
 
@@ -247,6 +257,7 @@ struct LZ4HC_CCtx_internal
                                 otherwise, favor compression ratio */
     LZ4_i8  dirty;           /* stream has to be fully reset if this flag is set */
     const LZ4HC_CCtx_internal* dictCtx;
+    LZ4_i8  hasWorkspace;    /* the state is followed by the temporary buffer of levels >= 10 (LZ4_STREAMHC_EXTSIZE) */
 };
 
 #define LZ4_STREAMHC_MINSIZE  262200  /* static size, for inter-version compatibility */
@@ -359,6 +370,8 @@ LZ4LIB_STATIC_API void LZ4_setCompressionLevel(
 /*! LZ4_favorDecompressionSpeed() : v1.8.2+ (experimental)
  *  Opt. Parser will favor decompression speed over compression ratio.
  *  Only applicable to levels >= LZ4HC_CLEVEL_OPT_MIN.
+ *  The setting is preserved by LZ4_resetStreamHC_fast() and LZ4_loadDictHC(),
+ *  it is reset by LZ4_initStreamHC().
  */
 LZ4LIB_STATIC_API void LZ4_favorDecompressionSpeed(
     LZ4_streamHC_t* LZ4_streamHCPtr, int favor);
@@ -388,6 +401,16 @@ LZ4LIB_STATIC_API void LZ4_favorDecompressionSpeed(
  */
 LZ4LIB_STATIC_API void LZ4_resetStreamHC_fast(
     LZ4_streamHC_t* LZ4_streamHCPtr, int compressionLevel);
+
+/*! LZ4_STREAMHC_EXTSIZE : v1.10.1+ (experimental)
+ *  Levels >= LZ4HC_CLEVEL_OPT_MIN employ a temporary buffer (~64 KB), allocated at each compression
+ *  (or on stack, when lz4hc.c is compiled with LZ4HC_HEAPMODE=0).
+ *  A state initialized by LZ4_initStreamHC() on a buffer of LZ4_STREAMHC_EXTSIZE bytes includes this buffer :
+ *  its compressions allocate nothing. States created by LZ4_createStreamHC() include it.
+ *  It is preserved by LZ4_resetStreamHC_fast() and LZ4_loadDictHC(), but not by LZ4_compress_HC_extStateHC(),
+ *  which initializes @state as a state of LZ4_sizeofStateHC() bytes : use LZ4_compress_HC_extStateHC_fastReset() instead.
+ */
+#define LZ4_STREAMHC_EXTSIZE (LZ4_STREAMHC_MINSIZE + 65584)
 
 /*! LZ4_compress_HC_extStateHC_fastReset() :
  *  A variant of LZ4_compress_HC_extStateHC().
