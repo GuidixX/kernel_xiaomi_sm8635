@@ -2,6 +2,7 @@
 #ifndef _LINUX_KPROFILES_H
 #define _LINUX_KPROFILES_H
 
+#include <linux/kconfig.h>
 #include <linux/notifier.h>
 
 enum kp_mode {
@@ -12,6 +13,31 @@ enum kp_mode {
 };
 
 extern unsigned int KP_MODE_CHANGE;
+
+/* A single snapshot keeps mode, display state and wake grace coherent. */
+#define KP_STATE_MODE_MASK	0x3U
+#define KP_STATE_INTERACTIVE	0x4U
+#define KP_STATE_WAKE		0x8U
+#define KP_STATE_CHANGE		0x80000001UL
+
+static inline bool kp_state_battery(unsigned int state)
+{
+	return (state & KP_STATE_MODE_MASK) == KP_MODE_BATTERY &&
+		!(state & KP_STATE_WAKE);
+}
+
+#if IS_REACHABLE(CONFIG_KPROFILES)
+unsigned int kp_get_state(void);
+/* Sleepable context only, never a kprofiles notifier callback. */
+void kp_wake_hint(void);
+#else
+static inline unsigned int kp_get_state(void)
+{
+	return KP_MODE_DISABLED | KP_STATE_INTERACTIVE;
+}
+
+static inline void kp_wake_hint(void) { }
+#endif
 
 /* Setters require sleepable context; applying the policy is asynchronous. */
 void kp_set_mode(unsigned int level);

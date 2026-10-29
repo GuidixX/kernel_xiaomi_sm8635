@@ -27,10 +27,12 @@ EXPORT_SYMBOL_GPL(KP_MODE_CHANGE);
 
 static DEFINE_MUTEX(kp_lock);
 static unsigned int kp_mode = CONFIG_KP_DEFAULT_MODE;
-static unsigned int kp_effective_mode = CONFIG_KP_DEFAULT_MODE;
+static unsigned int kp_state = CONFIG_KP_DEFAULT_MODE | KP_STATE_INTERACTIVE;
 static unsigned int kp_override_mode;
 static unsigned long kp_override_until;
 static bool kp_override;
+static bool kp_wake;
+static unsigned long kp_wake_until;
 static bool auto_kp;
 static bool screen_on = true;
 static bool suspended;
@@ -39,39 +41,92 @@ static struct kobject *kp_kobj;
 
 static void kp_apply_workfn(struct work_struct *work);
 static void kp_expire_workfn(struct work_struct *work);
+static void kp_wake_expire_workfn(struct work_struct *work);
 static DECLARE_WORK(kp_apply_work, kp_apply_workfn);
 static DECLARE_DELAYED_WORK(kp_expire_work, kp_expire_workfn);
+static DECLARE_DELAYED_WORK(kp_wake_expire_work, kp_wake_expire_workfn);
 
 /* Caller holds kp_lock. The hot-path getter never sleeps or notifies. */
 static void kp_refresh_locked(void)
 {
+	bool interactive = screen_on && !suspended;
 	unsigned int mode = kp_resolve_mode(kp_mode, auto_kp,
-			screen_on && !suspended, kp_override, kp_override_mode);
+			interactive, kp_override, kp_override_mode);
+	unsigned int state = mode;
 
-	WRITE_ONCE(kp_effective_mode, mode);
+	if (interactive)
+		state |= KP_STATE_INTERACTIVE;
+	if (kp_wake && mode != KP_MODE_DISABLED &&
+	    time_before(jiffies, kp_wake_until))
+		state |= KP_STATE_WAKE;
+	WRITE_ONCE(kp_state, state);
 	if (kp_ready)
-		schedule_work(&kp_apply_work);
+		queue_work(system_highpri_wq, &kp_apply_work);
 }
 
 static void kp_apply_workfn(struct work_struct *work)
 {
 	static unsigned int notified_mode = UINT_MAX;
-	unsigned int mode;
-	bool interactive;
+	static unsigned int notified_state = UINT_MAX;
+	unsigned int mode, state;
 
 	mutex_lock(&kp_lock);
-	mode = kp_effective_mode;
-	interactive = screen_on && !suspended;
+	state = kp_state;
 	mutex_unlock(&kp_lock);
 
-	kp_cpu_update(mode, interactive);
-	if (mode == notified_mode)
-		return;
-	notified_mode = mode;
+	kp_cpu_update(state);
+	mode = state & KP_STATE_MODE_MASK;
 	/* Callbacks may read or change the profile; do not hold kp_lock. */
-	blocking_notifier_call_chain(&kp_mode_notifier, KP_MODE_CHANGE,
-				     (void *)(uintptr_t)mode);
+	if (mode != notified_mode) {
+		notified_mode = mode;
+		blocking_notifier_call_chain(&kp_mode_notifier, KP_MODE_CHANGE,
+					     (void *)(uintptr_t)mode);
+	}
+	if (state != notified_state) {
+		notified_state = state;
+		blocking_notifier_call_chain(&kp_mode_notifier, KP_STATE_CHANGE,
+					     (void *)(uintptr_t)state);
+	}
 }
+
+static void kp_wake_expire_workfn(struct work_struct *work)
+{
+	unsigned long now;
+
+	mutex_lock(&kp_lock);
+	now = jiffies;
+	if (kp_wake) {
+		if (time_before(now, kp_wake_until)) {
+			mod_delayed_work(system_highpri_wq, &kp_wake_expire_work,
+					 kp_wake_until - now);
+		} else {
+			kp_wake = false;
+			kp_refresh_locked();
+		}
+	}
+	mutex_unlock(&kp_lock);
+}
+
+/* Release Battery ceilings before the fingerprint driver wakes its HAL. */
+void kp_wake_hint(void)
+{
+	mutex_lock(&kp_lock);
+	if (!kp_ready || kp_mode == KP_MODE_DISABLED ||
+	    (screen_on && !suspended)) {
+		mutex_unlock(&kp_lock);
+		return;
+	}
+	kp_wake = true;
+	kp_wake_until = jiffies + msecs_to_jiffies(KP_WAKE_GRACE_MS);
+	mod_delayed_work(system_highpri_wq, &kp_wake_expire_work,
+			 msecs_to_jiffies(KP_WAKE_GRACE_MS));
+	kp_refresh_locked();
+	mutex_unlock(&kp_lock);
+	flush_work(&kp_apply_work);
+	/* Frequency QoS normally queues another work item per cpufreq policy. */
+	kp_cpu_sync();
+}
+EXPORT_SYMBOL_GPL(kp_wake_hint);
 
 static void kp_expire_workfn(struct work_struct *work)
 {
@@ -121,6 +176,10 @@ void kp_set_mode(unsigned int level)
 		return;
 	mutex_lock(&kp_lock);
 	WRITE_ONCE(kp_mode, level);
+	if (level == KP_MODE_DISABLED) {
+		kp_wake = false;
+		cancel_delayed_work(&kp_wake_expire_work);
+	}
 	kp_override = false;
 	cancel_delayed_work(&kp_expire_work);
 	kp_refresh_locked();
@@ -130,9 +189,15 @@ EXPORT_SYMBOL_GPL(kp_set_mode);
 
 int kp_active_mode(void)
 {
-	return READ_ONCE(kp_effective_mode);
+	return kp_get_state() & KP_STATE_MODE_MASK;
 }
 EXPORT_SYMBOL_GPL(kp_active_mode);
+
+unsigned int kp_get_state(void)
+{
+	return READ_ONCE(kp_state);
+}
+EXPORT_SYMBOL_GPL(kp_get_state);
 
 int kp_notifier_register_client(struct notifier_block *nb)
 {
@@ -213,6 +278,12 @@ static ssize_t screen_on_show(struct kobject *kobj, struct kobj_attribute *attr,
 	return sysfs_emit(buf, "%u\n", READ_ONCE(screen_on));
 }
 
+static ssize_t wake_active_show(struct kobject *kobj, struct kobj_attribute *attr,
+			       char *buf)
+{
+	return sysfs_emit(buf, "%u\n", !!(kp_get_state() & KP_STATE_WAKE));
+}
+
 static ssize_t screen_on_store(struct kobject *kobj, struct kobj_attribute *attr,
 			       const char *buf, size_t count)
 {
@@ -222,12 +293,16 @@ static ssize_t screen_on_store(struct kobject *kobj, struct kobj_attribute *attr
 	if (ret)
 		return ret;
 	mutex_lock(&kp_lock);
-	WRITE_ONCE(screen_on, on);
 	/* A transient boost must not reappear after a screen-off interval. */
 	if (!on) {
 		kp_override = false;
 		cancel_delayed_work(&kp_expire_work);
+		if (screen_on) {
+			kp_wake = false;
+			cancel_delayed_work(&kp_wake_expire_work);
+		}
 	}
+	WRITE_ONCE(screen_on, on);
 	kp_refresh_locked();
 	mutex_unlock(&kp_lock);
 	flush_work(&kp_apply_work);
@@ -237,6 +312,7 @@ static ssize_t screen_on_store(struct kobject *kobj, struct kobj_attribute *attr
 static struct kobj_attribute kp_mode_attribute =
 	__ATTR(kp_mode, 0664, kp_mode_show, kp_mode_store);
 static struct kobj_attribute active_mode_attribute = __ATTR_RO(active_mode);
+static struct kobj_attribute wake_active_attribute = __ATTR_RO(wake_active);
 static struct kobj_attribute screen_on_attribute =
 	__ATTR(screen_on, 0664, screen_on_show, screen_on_store);
 
@@ -244,6 +320,7 @@ static struct attribute *kp_attrs[] = {
 	&kp_mode_attribute.attr,
 	&active_mode_attribute.attr,
 	&screen_on_attribute.attr,
+	&wake_active_attribute.attr,
 	NULL,
 };
 static const struct attribute_group kp_attr_group = {
@@ -271,7 +348,9 @@ static int kp_pm_event(struct notifier_block *nb, unsigned long event, void *dat
 	suspended = sleep;
 	if (sleep) {
 		kp_override = false;
+		kp_wake = false;
 		cancel_delayed_work(&kp_expire_work);
+		cancel_delayed_work(&kp_wake_expire_work);
 	}
 	kp_refresh_locked();
 	mutex_unlock(&kp_lock);
@@ -315,6 +394,7 @@ work_exit:
 	kp_ready = false;
 	mutex_unlock(&kp_lock);
 	cancel_delayed_work_sync(&kp_expire_work);
+	cancel_delayed_work_sync(&kp_wake_expire_work);
 	cancel_work_sync(&kp_apply_work);
 	kobject_put(kp_kobj);
 pm_exit:
@@ -332,8 +412,10 @@ static void __exit kp_exit(void)
 	mutex_lock(&kp_lock);
 	kp_ready = false;
 	kp_override = false;
+	kp_wake = false;
 	mutex_unlock(&kp_lock);
 	cancel_delayed_work_sync(&kp_expire_work);
+	cancel_delayed_work_sync(&kp_wake_expire_work);
 	cancel_work_sync(&kp_apply_work);
 	kp_cpu_exit();
 	kobject_put(kp_kobj);

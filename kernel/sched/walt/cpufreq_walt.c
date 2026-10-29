@@ -11,6 +11,7 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/kthread.h>
+#include <linux/kprofiles.h>
 #include <trace/events/power.h>
 
 #include "walt.h"
@@ -64,6 +65,7 @@ struct waltgov_policy {
 	bool			limits_changed;
 	bool			need_freq_update;
 	bool			thermal_isolated;
+	bool			kp_battery;
 };
 
 struct waltgov_cpu {
@@ -82,6 +84,26 @@ static DEFINE_PER_CPU(struct waltgov_cpu, waltgov_cpu);
 static DEFINE_PER_CPU(struct waltgov_tunables *, cached_tunables);
 
 /************************ Governor internals ***********************/
+
+static unsigned int waltgov_hispeed_freq(struct waltgov_policy *wg_policy)
+{
+	unsigned int freq = wg_policy->tunables->hispeed_freq;
+
+	if (wg_policy->kp_battery &&
+	    is_max_possible_cluster_cpu(wg_policy->policy->cpu))
+		freq = min(freq, 2188800U);
+	return freq;
+}
+
+static unsigned int waltgov_hispeed_load(struct waltgov_policy *wg_policy)
+{
+	unsigned int load = wg_policy->tunables->hispeed_load;
+
+	if (wg_policy->kp_battery &&
+	    is_max_possible_cluster_cpu(wg_policy->policy->cpu))
+		load = max(load, 85U);
+	return load;
+}
 
 static bool waltgov_should_update_freq(struct waltgov_policy *wg_policy, u64 time)
 {
@@ -236,6 +258,19 @@ static inline unsigned long walt_map_util_freq(unsigned long util,
 {
 	unsigned long fmax = wg_policy->policy->cpuinfo.max_freq;
 	unsigned int shift = wg_policy->tunables->target_load_shift;
+	struct waltgov_cpu *wg_cpu = &per_cpu(waltgov_cpu, cpu);
+	struct rq *rq = cpu_rq(cpu);
+
+	/*
+	 * Reduce ordinary load's headroom, retaining the original map for all
+	 * boost reasons, RT and uclamp floors. In particular, target_util()'s
+	 * inverse for hispeed/RTG still maps back to the requested boost frequency.
+	 */
+	if (wg_policy->kp_battery && wg_policy->tunables->boost <= 0 &&
+	    wg_cpu->reasons == CPUFREQ_REASON_LOAD && !cpu_util_rt(rq) &&
+	    !uclamp_rq_get(rq, UCLAMP_MIN) &&
+	    util < wg_policy->tunables->target_load_thresh)
+		return mult_frac(fmax, 115, 100) * util / cap;
 
 	if (util >= wg_policy->tunables->target_load_thresh &&
 	    cpu_util_rt(cpu_rq(cpu)) < (cap >> 2))
@@ -394,7 +429,7 @@ static void waltgov_walt_adjust(struct waltgov_cpu *wg_cpu, unsigned long cpu_ut
 		max_and_reason(util, wg_policy->rtg_boost_util, wg_cpu, CPUFREQ_REASON_RTG_BOOST);
 
 	is_hiload = (cpu_util >= mult_frac(wg_policy->avg_cap,
-					   wg_policy->tunables->hispeed_load,
+					   waltgov_hispeed_load(wg_policy),
 					   100));
 
 	if (cpumask_test_cpu(wg_cpu->cpu, cpu_partial_halt_mask) &&
@@ -479,6 +514,7 @@ static void waltgov_update_freq(struct waltgov_callback *cb, u64 time,
 	struct waltgov_policy *wg_policy = wg_cpu->wg_policy;
 	unsigned long hs_util, rtg_boost_util;
 	unsigned int next_f;
+	bool battery;
 
 	if (!wg_policy->tunables->pl && flags & WALT_CPUFREQ_PL)
 		return;
@@ -487,10 +523,18 @@ static void waltgov_update_freq(struct waltgov_callback *cb, u64 time,
 	wg_cpu->flags = flags;
 	raw_spin_lock(&wg_policy->update_lock);
 
+	battery = kp_state_battery(kp_get_state());
+	if (wg_policy->kp_battery != battery) {
+		wg_policy->kp_battery = battery;
+		wg_policy->limits_changed = true;
+		wg_policy->need_freq_update = true;
+		wg_policy->hispeed_util = target_util(wg_policy,
+						waltgov_hispeed_freq(wg_policy));
+	}
 	if (wg_policy->max != wg_cpu->max) {
 		wg_policy->max = wg_cpu->max;
 		hs_util = target_util(wg_policy,
-					wg_policy->tunables->hispeed_freq);
+					waltgov_hispeed_freq(wg_policy));
 		wg_policy->hispeed_util = hs_util;
 
 		rtg_boost_util = target_util(wg_policy,
@@ -666,7 +710,7 @@ static ssize_t hispeed_freq_store(struct gov_attr_set *attr_set,
 	list_for_each_entry(wg_policy, &attr_set->policy_list, tunables_hook) {
 		raw_spin_lock_irqsave(&wg_policy->update_lock, flags);
 		hs_util = target_util(wg_policy,
-					wg_policy->tunables->hispeed_freq);
+					waltgov_hispeed_freq(wg_policy));
 		wg_policy->hispeed_util = hs_util;
 		raw_spin_unlock_irqrestore(&wg_policy->update_lock, flags);
 	}
@@ -898,7 +942,7 @@ static ssize_t store_target_load_thresh(struct gov_attr_set *attr_set,
 
 		raw_spin_lock_irqsave(&wg_policy->update_lock, flags);
 		wg_policy->hispeed_util = target_util(wg_policy,
-						wg_policy->tunables->hispeed_freq);
+						waltgov_hispeed_freq(wg_policy));
 		wg_policy->rtg_boost_util = target_util(wg_policy,
 						wg_policy->tunables->rtg_boost_freq);
 		raw_spin_unlock_irqrestore(&wg_policy->update_lock, flags);

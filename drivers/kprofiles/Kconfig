@@ -11,6 +11,8 @@ config KPROFILES
 	  sysfs. CPU limits use independent frequency QoS requests and follow
 	  cpufreq policy creation and removal. The QTI devfreq cooling driver
 	  can apply a separate GPU battery ceiling.
+	  Battery uses lower ceilings with an inactive display. The peridot
+	  fingerprint driver can briefly release them before waking its HAL.
 
 	  Thermal and userspace constraints remain independent. See
 	  drivers/kprofiles/README.md for the ABI and profile policy.

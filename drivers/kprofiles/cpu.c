@@ -6,6 +6,7 @@
 #include <linux/cpufreq.h>
 #include <linux/list.h>
 #include <linux/mutex.h>
+#include <linux/sched/topology.h>
 #include <linux/slab.h>
 
 #include "policy.h"
@@ -19,16 +20,33 @@ struct kp_cpu_policy {
 
 static LIST_HEAD(kp_policies);
 static DEFINE_MUTEX(kp_cpu_lock);
-static unsigned int kp_cpu_mode = CONFIG_KP_DEFAULT_MODE;
-static bool kp_cpu_interactive = true;
+static unsigned int kp_cpu_state = CONFIG_KP_DEFAULT_MODE | KP_STATE_INTERACTIVE;
 static bool kp_cpu_stopping;
+
+/* Derive roles from capacity, including devices with a different CPU layout. */
+static enum kp_cpu_class kp_cpu_classify(unsigned int cpu)
+{
+	unsigned long capacity = arch_scale_cpu_capacity(cpu);
+	unsigned long lowest = ULONG_MAX, highest = 0;
+	unsigned int i;
+
+	for_each_possible_cpu(i) {
+		unsigned long cap = arch_scale_cpu_capacity(i);
+
+		lowest = min(lowest, cap);
+		highest = max(highest, cap);
+	}
+	if (capacity == lowest)
+		return KP_CPU_LITTLE;
+	return capacity == highest ? KP_CPU_PRIME : KP_CPU_BIG;
+}
 
 static void kp_cpu_apply(struct kp_cpu_policy *entry)
 {
 	unsigned int min_freq, max_freq;
 	int ret;
 
-	kp_cpu_limits(kp_cpu_mode, kp_cpu_interactive,
+	kp_cpu_limits(kp_cpu_state, kp_cpu_classify(entry->policy->cpu),
 		entry->policy->cpuinfo.min_freq, entry->policy->cpuinfo.max_freq,
 		&min_freq, &max_freq);
 	/* Release a performance floor before installing a battery ceiling. */
@@ -42,16 +60,31 @@ static void kp_cpu_apply(struct kp_cpu_policy *entry)
 				    entry->policy->cpu, ret);
 }
 
-void kp_cpu_update(unsigned int mode, bool interactive)
+void kp_cpu_update(unsigned int state)
 {
 	struct kp_cpu_policy *entry;
 
 	mutex_lock(&kp_cpu_lock);
-	kp_cpu_mode = mode;
-	kp_cpu_interactive = interactive;
+	kp_cpu_state = state;
 	list_for_each_entry(entry, &kp_policies, link)
 		kp_cpu_apply(entry);
 	mutex_unlock(&kp_cpu_lock);
+}
+
+/* Never take policy->rwsem under kp_cpu_lock: CREATE/REMOVE use that order. */
+void kp_cpu_sync(void)
+{
+	struct cpufreq_policy *policy;
+	unsigned int cpu;
+
+	for_each_possible_cpu(cpu) {
+		policy = cpufreq_cpu_get(cpu);
+		if (!policy)
+			continue;
+		if (cpu == policy->cpu)
+			cpufreq_update_policy(cpu);
+		cpufreq_cpu_put(policy);
+	}
 }
 
 static int kp_cpu_add(struct cpufreq_policy *policy)

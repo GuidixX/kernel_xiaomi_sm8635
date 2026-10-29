@@ -55,15 +55,18 @@ static int devfreq_cdev_kp_notifier_cb(struct notifier_block *nb,
 		container_of(nb, struct devfreq_cdev_device, kp_nb);
 	unsigned long limit = PM_QOS_MAX_FREQUENCY_DEFAULT_VALUE;
 	unsigned long target;
+	unsigned int state;
 	int i, ret;
 
-	if (action != KP_MODE_CHANGE)
+	if (action != KP_STATE_CHANGE)
 		return NOTIFY_DONE;
 
 	mutex_lock(&cdev_data->kp_lock);
 	/* Read inside the lock so initial application cannot race a notification. */
-	if (kp_active_mode() == KP_MODE_BATTERY) {
-		target = cdev_data->freq_table[0] / 5 * 4;
+	state = kp_get_state();
+	if (kp_state_battery(state)) {
+		/* kHz; select a real OPP for KGSL's QoS notifier. */
+		target = state & KP_STATE_INTERACTIVE ? 736000 : 353000;
 		for (i = 0; i < cdev_data->max_state; i++)
 			if (cdev_data->freq_table[i] <= target)
 				break;
@@ -92,7 +95,7 @@ static void devfreq_cdev_kp_init(struct devfreq_cdev_device *cdev_data)
 		dev_pm_qos_remove_request(&cdev_data->kp_max_freq_req);
 		goto error;
 	}
-	devfreq_cdev_kp_notifier_cb(&cdev_data->kp_nb, KP_MODE_CHANGE, NULL);
+	devfreq_cdev_kp_notifier_cb(&cdev_data->kp_nb, KP_STATE_CHANGE, NULL);
 	return;
 error:
 	dev_warn(cdev_data->dev, "Cannot add kprofiles GPU vote: %d\n", ret);
