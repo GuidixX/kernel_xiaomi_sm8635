@@ -475,7 +475,7 @@ static irqreturn_t q6v5_wdog_interrupt(int irq, void *data)
 		}
 	}
 	/* XIAOMI-CHANGE-CRASH (3025407) end: crash history */
-	dev_err(q6v5->dev, "rproc coredump state: %s\n", q6v5->rproc->dump_conf);
+	dev_err(q6v5->dev, "rproc coredump state: %d\n", (int)q6v5->rproc->dump_conf);
 	dev_err(q6v5->dev, "rproc recovery state: %s\n",
 		q6v5->rproc->recovery_disabled ?
 		"disabled and lead to device crash" :
@@ -547,7 +547,7 @@ static irqreturn_t q6v5_fatal_interrupt(int irq, void *data)
 		}
 	}
 	/* XIAOMI-CHANGE-CRASH (3025407) end: crash history */
-	dev_err(q6v5->dev, "rproc coredump state: %s\n", q6v5->rproc->dump_conf);
+	dev_err(q6v5->dev, "rproc coredump state: %d\n", (int)q6v5->rproc->dump_conf);
 	dev_err(q6v5->dev, "rproc recovery state: %s\n",
 		q6v5->rproc->recovery_disabled ? "disabled and lead to device crash" :
 		"enabled and kick reovery process");
